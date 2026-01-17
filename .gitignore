@@ -33,3 +33,8 @@ local.properties
 *.log
 *.tmp
 *.bak
+
+# Models
+*.gguf
+*.bin
+models/

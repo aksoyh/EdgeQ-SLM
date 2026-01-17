@@ -1,0 +1,100 @@
+plugins {
+    alias(libs.plugins.androidLibrary)
+    alias(libs.plugins.kotlinMultiplatform)
+}
+
+kotlin {
+    android()
+    
+    listOf(
+        iosX64(),
+        iosArm64(),
+        iosSimulatorArm64()
+    ).forEach { iosTarget ->
+        iosTarget.binaries.framework {
+            baseName = "Shared"
+            isStatic = true
+        }
+    }
+
+    sourceSets {
+        commonMain.dependencies {
+            implementation(libs.kotlinx.coroutines.core)
+        }
+        androidMain.dependencies {
+            implementation(libs.kotlinx.coroutines.android)
+        }
+    }
+}
+
+android {
+    namespace = "com.example.edgeqslm.shared"
+    compileSdk = 34
+
+    defaultConfig {
+        minSdk = 24
+
+        // NDK configuration for llama.cpp
+        ndk {
+            // Only build for arm64-v8a (modern 64-bit ARM devices)
+            abiFilters += listOf("arm64-v8a")
+        }
+
+        // External native build configuration
+        externalNativeBuild {
+            cmake {
+                // CMake arguments for llama.cpp build
+                arguments += listOf(
+                    "-DANDROID_STL=c++_shared",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DLLAMA_CPP_PATH=/Users/hasanaksoy/llama.cpp"
+                )
+                // Use safe math flags compatible with llama.cpp
+                cppFlags += listOf("-O3", "-fno-finite-math-only")
+            }
+        }
+    }
+
+    // CMake build configuration
+    externalNativeBuild {
+        cmake {
+            path = file("src/androidMain/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    // NDK version - use a stable version that supports llama.cpp
+    ndkVersion = "26.1.10909125"
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    // Build types configuration
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            // Native libraries will be stripped in CMake
+        }
+        debug {
+            isJniDebuggable = true
+        }
+    }
+
+    // Packaging options for native libraries
+    packaging {
+        jniLibs {
+            // Keep all native libraries
+            keepDebugSymbols += listOf("**/*.so")
+            // Use legacy packaging for better compatibility
+            useLegacyPackaging = true
+        }
+    }
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+}

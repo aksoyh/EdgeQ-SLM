@@ -3,127 +3,193 @@
 ## Project Structure (Proje Yapısı)
 Bu proje Kotlin Multiplatform (KMP) kullanılarak hazırlanmıştır. Kodun büyük bir kısmı Android ve iOS arasında ortaktır.
 
--   **`shared` module**:
-    -   `commonMain`: Tüm mantık burada (ViewModel, Data classes).
-    -   `androidMain`: Android'e özel kodlar. `AndroidLlamaCppEngine` burada bulunur. JNI çağrıları buradan yapılır.
-    -   `androidMain/cpp`: **llama.cpp JNI bridge** - Native C++ kodu ve CMake konfigürasyonu.
-    -   `iosMain`: iOS için stub (taslak) kodlar.
--   **`composeApp` module**:
-    -   `commonMain`: UI kodları (`App.kt`). Ekran tasarımı buradadır.
-    -   `androidMain`: `MainActivity.kt`. Uygulamanın Android giriş noktası.
-    -   `iosMain`: `MainViewController.kt`. iOS tarafına Compose UI'ı bağlayan köprü.
-
-## ✅ llama.cpp Entegrasyonu TAMAMLANDI
-
-### Native Build Yapısı
+### Module Yapısı
 ```
-shared/src/androidMain/cpp/
-├── CMakeLists.txt        # llama.cpp cross-compile konfigürasyonu
-└── llama_jni.cpp          # JNI bridge implementasyonu
+EdgeQ-SLM/
+├── shared/                          # Paylaşılan iş mantığı
+│   ├── commonMain/                  # Cross-platform kod
+│   │   ├── LlmEngine.kt             # Inference engine interface
+│   │   ├── LlmViewModel.kt          # State management + download
+│   │   └── ModelRepository.kt       # Model yönetimi (expect)
+│   ├── androidMain/                 # Android implementasyonları
+│   │   ├── AndroidLlamaCppEngine.kt # JNI wrapper
+│   │   ├── ModelRepository.android.kt # HuggingFace download
+│   │   └── cpp/                     # Native C++ kodu
+│   │       ├── llama_jni.cpp        # JNI bridge
+│   │       └── CMakeLists.txt       # Cross-compile config
+│   └── iosMain/                     # iOS implementasyonları
+│       └── ModelRepository.ios.kt   # iOS download (placeholder)
+├── composeApp/                      # UI modülü
+│   ├── commonMain/                  # Shared UI
+│   │   └── App.kt                   # Ana UI + download progress
+│   ├── androidMain/                 # Android UI
+│   │   └── MainActivity.kt          # Entry point
+│   └── iosMain/                     # iOS UI
+│       └── MainViewController.kt    # iOS entry point
 ```
 
-### JNI Fonksiyonları
-- `loadModelNative(path: String): Boolean` - GGUF model yükleme
-- `generateNative(prompt, maxTokens, temperature): String` - Text generation
-- `unloadNative()` - Model unload
-- `getPrefillTimeNative(): Long` - TTFT (Time To First Token) ms
-- `getDecodeTimeNative(): Long` - Decode süresi ms
-- `getTokensGeneratedNative(): Int` - Üretilen token sayısı
-- `isModelLoadedNative(): Boolean` - Model yüklü mü kontrolü
+---
 
-### Ölçüm Metrikleri
-- **Prefill Time (TTFT)**: İlk token'a kadar geçen süre
-- **Decode Time**: Token üretim süresi
-- **Tokens/sec**: Saniyede üretilen token
-- **Peak Memory**: `Debug.getNativeHeapAllocatedSize()` ile native heap ölçümü
+## ✅ Tamamlanan Özellikler
 
-## Model Setup (Model Kurulumu)
-1.  **Model**: `qwen-q8_0.gguf` veya benzer bir GGUF modeli.
-2.  **Location (Konum)**: `/sdcard/Download/qwen-q8_0.gguf`
-    - ADB ile: `adb push qwen-q8_0.gguf /sdcard/Download/`
-    - Ya da cihazdan Files uygulamasıyla Downloads klasörüne kopyala
+### 1. llama.cpp Entegrasyonu
+- **JNI Bridge**: `llama_jni.cpp` ile native llama.cpp çağrıları
+- **ChatML Template**: Prompt'ları `<|im_start|>user...` formatında sarmalama
+- **Stop Token Detection**: `<|im_end|>` görünce üretimi durdurma
+- **Sampling Parameters**: temperature, top_p, repeat_penalty
 
-## How to Build (Nasıl Derlenir)
+### 2. Model İndirme (YENİ - 2026-01-18)
+- **HuggingFace Download**: Uygulama içinden model indirme
+- **Progress UI**: %, MB/Toplam MB, Mbps hız göstergesi
+- **Notification**: Sistem bildiriminde indirme durumu
+- **Model Seçimi**: Dropdown ile mevcut modellerden seçim
+- **Debug Mode**: "Force No Model" checkbox'ı ile test
+
+### 3. Performans Metrikleri
+- **TTFT**: Time To First Token (Prefill süresi)
+- **Decode Speed**: Saniyede üretilen token
+- **Memory**: Native heap kullanımı
+
+---
+
+## JNI Fonksiyonları
+
+```kotlin
+// Model yükleme
+private external fun loadModelNative(path: String): Boolean
+
+// Text üretme
+private external fun generateNative(
+    prompt: String,
+    maxTokens: Int,        // 256 default
+    temperature: Float,    // 0.7 default
+    topP: Float,           // 0.9 default
+    repeatPenalty: Float,  // 1.1 default
+    useChatTemplate: Boolean
+): String
+
+// Metrikleri al
+private external fun getPrefillTimeNative(): Long
+private external fun getDecodeTimeNative(): Long
+private external fun getTokensGeneratedNative(): Int
+private external fun getMemoryUsageNative(): Long
+
+// Cleanup
+private external fun unloadNative()
+private external fun isModelLoadedNative(): Boolean
+```
+
+---
+
+## Model Download Sistemi
+
+### Akış
+```
+1. Uygulama açılır → ModelRepository.isModelDownloaded() kontrol
+2. Model yoksa → "Download" butonu göster
+3. Download başlat → HuggingFace'ten indir
+4. Progress update → UI ve notification güncelle
+5. Tamamlandı → "Load Model" butonu göster
+```
+
+### Download URL
+```
+https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q8_0.gguf
+```
+
+### Dosya Konumu
+```
+/sdcard/Android/data/com.aksoyapps.edgeqslm/files/qwen1_5-1_8b-chat-q8_0.gguf
+```
+
+---
+
+## Build ve Çalıştırma
+
+### Build
 ```bash
-# Shared module (native library dahil)
-./gradlew :shared:assembleDebug
-
-# Tam APK
+# Debug APK oluştur
 ./gradlew :composeApp:assembleDebug
 
 # APK konumu
 composeApp/build/outputs/apk/debug/composeApp-debug.apk
 ```
 
-## How to Run (Nasıl Çalıştırılır)
-1.  Model dosyasını cihaza kopyala: `/sdcard/Download/qwen-q8_0.gguf`
-2.  Android Studio'yu aç.
-3.  `composeApp` konfigürasyonunu seç ve "Run" tuşuna bas.
-4.  Uygulama açıldığında "Load Model" butonuna bas.
-5.  "Generate" butonuna basarak inference işlemini başlat.
-6.  Metrikleri (TTFT, tok/s, memory) ekranda gör.
+### Cihaza Yükle
+```bash
+# ADB ile yükle
+adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
 
-## Build Configuration Details
-
-### NDK Version
-```
-ndkVersion = "26.1.10909125"
+# Uygulamayı başlat
+adb shell am start -n com.aksoyapps.edgeqslm/.MainActivity
 ```
 
-### ABI Filter (Desteklenen Mimariler)
-```
-abiFilters = ["arm64-v8a"]
-```
-Sadece 64-bit ARM cihazları destekleniyor. x86 emulator'da çalışmaz!
+### Manuel Model Yükleme (Opsiyonel)
+```bash
+# Dizini oluştur
+adb shell mkdir -p /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
 
-### llama.cpp CMake Options
-```cmake
-BUILD_SHARED_LIBS = OFF    # Static linkage
-LLAMA_BUILD_TESTS = OFF   
-LLAMA_BUILD_TOOLS = OFF   
-LLAMA_BUILD_EXAMPLES = OFF
-LLAMA_BUILD_COMMON = ON    # common/ utilities gerekli
-GGML_OPENMP = OFF          # OpenMP disabled for simpler Android build
-GGML_CPU = ON              # CPU backend aktif
+# Modeli kopyala
+adb push qwen-q8_0.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
 ```
 
-## Extending the Project (Projeyi Genişletme)
+### Logcat
+```bash
+# Model repository logları
+adb logcat -s ModelRepository:D
 
-### 1. NPU/GPU Integration (NPU/GPU Entegrasyonu)
-`llama.cpp` kütüphanesi GPU/NPU desteği sunar:
--   **OpenCL**: `GGML_OPENCL=ON` ile aktif edilir (Adreno GPU)
--   **Vulkan**: `GGML_VULKAN=ON` ile aktif edilir
--   CMakeLists.txt'de `model_params.n_gpu_layers` değerini artırarak layer'ları GPU'ya offload et
+# JNI logları
+adb logcat -s LlamaJNI:V AndroidLlamaCppEngine:V
+```
 
-### 2. INT4 Quantization Test
--   Farklı quantization seviyelerini test etmek için:
-    -   `qwen-q4_0.gguf` (INT4)
-    -   `qwen-q8_0.gguf` (INT8)
--   Sonuçları karşılaştır: speed vs accuracy tradeoff
-
-### 3. Adding More Metrics (Daha Fazla Metrik Ekleme)
--   **Energy**: Android'de `BatteryManager` API'sini kullanarak anlık akım çekimini ölçebilirsin
--   **Detailed Memory**: `Debug.getMemoryInfo()` ile PSS değeri
-
-### 4. Streaming Output
-JNI tarafında callback mekanizması ekleyerek token-by-token streaming yapılabilir.
+---
 
 ## Troubleshooting (Sorun Giderme)
 
-### "Model not loaded" hatası
+### "Model not found" hatası
 - Model yolunu kontrol et
-- Dosya izinlerini kontrol et: `READ_EXTERNAL_STORAGE` permission gerekli
-- Logcat'te `LlamaJNI` tag'ini filtrele
+- `adb shell ls /sdcard/Android/data/com.aksoyapps.edgeqslm/files/`
+- Debug checkbox'ı aktif mi kontrol et
+
+### "Download failed: connection abort"
+- İnternet bağlantısını kontrol et
+- WiFi kullan (mobil veri yavaş olabilir)
+- Uygulamayı yeniden başlat
+
+### "Read permission" hatası
+- Model `/sdcard/Android/data/com.aksoyapps.edgeqslm/files/` içinde olmalı
+- Downloads klasöründen çalışmaz (scoped storage)
 
 ### Build hatası: "ffast-math"
-- CMakeLists.txt'de `-fno-finite-math-only` flag'i ekli olmalı
-- llama.cpp non-finite math arithmetic gerektiriyor
+- CMakeLists.txt'de `-fno-finite-math-only` flag'i var mı kontrol et
 
 ### Emulator'da çalışmıyor
-- x86/x86_64 emulator desteklenmiyor, sadece arm64-v8a
-- Gerçek ARM cihaz kullan
+- Sadece arm64-v8a ABI destekleniyor
+- Gerçek ARM64 cihaz kullan
 
-## Tips (İpuçları)
--   **Logs**: Logcat'te `LlamaJNI` ve `AndroidLlamaCppEngine` tag'lerini filtrele
--   **Performance**: Native taraftaki timer'lar JNI ile döndürülüyor, çok hassas ölçüm mümkün
--   **Memory**: Model yüklendiğinde ~2-4GB native heap kullanımı bekleniyor (INT8 için)
+---
+
+## Gelecek Çalışmalar
+
+1. **INT4 Quantization**: Q4_0 modeli ile hız karşılaştırması
+2. **GPU Offload**: `GGML_OPENCL` veya `GGML_VULKAN` ile GPU kullanımı
+3. **iOS Tamamlama**: iOS download ve inference
+4. **Streaming Output**: Token-by-token çıktı
+5. **Energy Profiling**: Batarya tüketimi ölçümü
+
+---
+
+## Paket Bilgileri
+
+| Özellik | Değer |
+|---------|-------|
+| Package Name | com.aksoyapps.edgeqslm |
+| Min SDK | 24 (Android 7.0) |
+| Target SDK | 34 (Android 14) |
+| NDK Version | 26.1.10909125 |
+| Architecture | arm64-v8a |
+| Model Size | ~1.86 GB |
+
+---
+
+*Son Güncelleme: 2026-01-18*

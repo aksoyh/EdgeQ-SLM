@@ -1,61 +1,152 @@
-# Session Notes - 2026-01-18
+# Session Notes - 2026-01-18 (Updated)
 
 ## 📝 Summary
-This session focused on **Android device integration**, **JNI bridge improvements**, and **GitHub repository setup**. We successfully established the pipeline for running quantized SLMs on a physical Android device, improved the inference quality with ChatML templates, and documented the project progress.
+This session focused on **model download implementation**, **package renaming**, and **Android device integration improvements**. We successfully implemented in-app model download from HuggingFace with progress tracking, fixed permission issues, added model selection UI, and updated the package name to `com.aksoyapps.edgeqslm`.
+
+---
 
 ## ✅ Completed Tasks
 
-### 1. Inference Engine Improvements
-- **ChatML Support:** Implemented logic in `llama_jni.cpp` to wrap prompts in ChatML format (`<|im_start|>user...`) for instruction-tuned models.
-- **Stop Token Detection:** Added native C++ logic to detect and stop generation upon encountering `<|im_end|>` or `<|endoftext|>`.
-- **Sampling Parameters:** Exposed `top_p` and `repeat_penalty` to the UI via JNI to fix repetitive or low-quality outputs.
-- **Truncation Fix:** Increased default `n_predict` from 50 to 256 tokens to prevent cut-off sentences.
+### 1. Model Download Feature (NEW)
+- **HuggingFace Integration:** Implemented download from `huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF`
+- **Progress UI:** Added progress bar showing:
+  - Percentage complete (%)
+  - Downloaded / Total size (MB)
+  - Speed (Mbps)
+- **Notification:** System notification with download progress
+- **Model Selection:** Dropdown to choose from available `.gguf` files
+- **Debug Mode:** Checkbox to force "No Model" state for testing download flow
 
-### 2. Android Device Deployment
-- **Model Path Strategy:** Switched from `/sdcard/Download` (permission locked) to app-specific storage `/sdcard/Android/data/com.example.edgeqslm/files/` which allows read/write without special permissions on Android 11+.
-- **Manifest Permissions:** Added `READ_EXTERNAL_STORAGE`, `requestLegacyExternalStorage`, and `largeHeap="true"` to handle 2GB+ model files.
-- **UI Dashboard:** Created a detailed Compose UI with real-time metrics for TTFT (Time To First Token), Decode Speed, and Memory Usage.
+### 2. Package Rename
+- Changed from `com.example.edgeqslm` to `com.aksoyapps.edgeqslm`
+- Updated all relevant files:
+  - `composeApp/build.gradle.kts`
+  - `shared/build.gradle.kts`
+  - `AndroidManifest.xml`
+  - All Kotlin package declarations
+  - JNI function names in `llama_jni.cpp`
 
-### 3. Project Management
-- **GitHub Repo:** Initialized private repository `aksoyh/EdgeQ-SLM` and force-pushed the codebase.
-- **Documentation:**
-    - Created `README.md` with setup/build guide.
-    - Created `docs/PROGRESS_REPORT.md` for thesis tracking.
+### 3. Cross-Platform Architecture
+- **ModelRepository expect/actual:** Common interface with platform-specific implementations
+- **Android:** Uses native `HttpURLConnection` for reliable large file downloads
+- **iOS:** Placeholder implementation (uses Ktor client)
 
-## 🚧 Status & Next Steps
+### 4. Previous Session Work (Morning)
+- **ChatML Support:** Wrap prompts in ChatML format
+- **Stop Token Detection:** Detect `<|im_end|>` and stop generation
+- **Sampling Parameters:** Exposed top_p, repeat_penalty via JNI
+- **UI Dashboard:** Real-time metrics (TTFT, Decode Speed, Memory)
 
-### Immediate Action Items
-1.  **Verify Device Inference:**
-    - We pushed the model to `/sdcard/Android/data/com.example.edgeqslm/files/qwen-q8_0.gguf`.
-    - **Task:** Launch app -> Tap "Load Model" -> Tap "Generate".
-    - **Expected Result:** Logcat should show "Model loaded successfully" and generation should produce coherent text.
+---
 
-2.  **Benchmark Data Collection:**
-    - Once verifying inference works, record the following metrics from the UI for the thesis:
-        - TTFT (ms)
-        - Decode Speed (tokens/sec)
-        - Peak Memory (MB)
+## 🚧 Issues Encountered & Solutions
 
-3.  **Optimization:**
-    - If speed is unsatisfactory (e.g., < 5 t/s), prepare a Q4_0 (INT4) quantized version of the model and compare performance.
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| Google Drive warning page | Files >100MB trigger virus scan | Switched to HuggingFace direct URL |
+| Ktor "connection abort" | Memory issues with 1.8GB file | Replaced Ktor with native HttpURLConnection |
+| Read permission error | Scoped storage on Downloads folder | Use app's external files directory |
+| FlowCollector scope mismatch | Nested function couldn't emit | Inlined download logic in Flow |
+| Duplicate import | FileOutputStream imported twice | Removed duplicate |
+| Model not detected after download | Priority check incorrect | App files dir checked first |
 
-## 📋 Technical Reference
+---
 
-**Key Commands:**
-- **Push Model:**
-  ```bash
-  adb push /path/to/qwen-q8_0.gguf /sdcard/Android/data/com.example.edgeqslm/files/
-  ```
-- **Logcat Monitoring:**
-  ```bash
-  adb logcat -s LlamaJNI:V AndroidLlamaCppEngine:V
-  ```
-- **Git Push:**
-  ```bash
-  git push origin main
-  ```
+## 📁 Files Created/Modified
 
-**Config:**
-- **Model:** Qwen 1.5 1.8B Chat (INT8 / Q8_0)
-- **Context Size:** 4096 tokens
-- **Threads:** 4 (via JNI)
+### New Files
+```
+shared/src/commonMain/kotlin/com/aksoyapps/edgeqslm/ModelRepository.kt
+shared/src/androidMain/kotlin/com/aksoyapps/edgeqslm/ModelRepository.android.kt
+shared/src/iosMain/kotlin/com/aksoyapps/edgeqslm/ModelRepository.ios.kt
+```
+
+### Modified Files
+```
+shared/src/commonMain/kotlin/com/aksoyapps/edgeqslm/LlmViewModel.kt
+composeApp/src/commonMain/kotlin/com/aksoyapps/edgeqslm/App.kt
+composeApp/src/androidMain/kotlin/com/aksoyapps/edgeqslm/MainActivity.kt
+composeApp/src/iosMain/kotlin/com/aksoyapps/edgeqslm/MainViewController.kt
+composeApp/src/androidMain/AndroidManifest.xml
+composeApp/build.gradle.kts
+shared/build.gradle.kts
+gradle/libs.versions.toml
+docs/PROGRESS_REPORT.md
+README.md
+```
+
+---
+
+## 🔧 Technical Reference
+
+### Key Commands
+
+**Push Model Manually:**
+```bash
+adb push qwen-q8_0.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
+```
+
+**Build & Install:**
+```bash
+./gradlew :composeApp:assembleDebug
+adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
+```
+
+**Logcat Monitoring:**
+```bash
+adb logcat -s ModelRepository:D LlamaJNI:V
+```
+
+**Git Branch:**
+```bash
+git checkout feature/model-download
+git push -u origin feature/model-download
+```
+
+### Download URL
+```
+https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q8_0.gguf
+```
+
+### Model Storage Paths
+| Priority | Path | Permissions |
+|----------|------|-------------|
+| 1 | `/sdcard/Android/data/com.aksoyapps.edgeqslm/files/` | No special permissions |
+| 2 | `/sdcard/Download/` | May require READ_EXTERNAL_STORAGE |
+
+---
+
+## 📋 Status & Next Steps
+
+### ✅ Completed
+- [x] Model download from HuggingFace
+- [x] Progress UI with speed/size info
+- [x] Model selection dropdown
+- [x] Debug checkbox for testing
+- [x] Package rename to com.aksoyapps
+- [x] Documentation updated
+- [x] Git push to feature/model-download
+
+### 🔜 Next Actions
+1. **Benchmark Collection:** Record TTFT, tokens/sec, memory on device
+2. **INT4 Testing:** Quantize to Q4_0, compare speed vs quality
+3. **iOS Testing:** Verify iOS build works
+4. **Merge:** Review and merge feature branch to main
+
+---
+
+## 📊 Config Reference
+
+| Setting | Value |
+|---------|-------|
+| Model | Qwen 1.5 1.8B Chat (INT8 / Q8_0) |
+| Size | ~1.86 GB |
+| Context | 4096 tokens |
+| Threads | 4 |
+| Package | com.aksoyapps.edgeqslm |
+| Min SDK | 24 |
+| Target SDK | 34 |
+
+---
+
+*Last Updated: 2026-01-18 20:23*

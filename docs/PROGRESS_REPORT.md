@@ -20,6 +20,8 @@
 | 2026-01-18 | UI Integration | Connected LlmEngine to Compose UI with metrics dashboard |
 | 2026-01-18 | Chat Template | Added ChatML format and stop token detection |
 | 2026-01-18 | Device Deploy | Model deployment and permission debugging |
+| 2026-01-18 | Model Download | Implemented HuggingFace download with progress UI |
+| 2026-01-18 | Package Rename | Changed package from com.example to com.aksoyapps |
 
 ---
 
@@ -89,11 +91,12 @@ Resolution: `pip3 install transformers torch sentencepiece huggingface_hub`
 ```
 EdgeQ-SLM/
 ├── shared/
-│   ├── src/commonMain/kotlin/    # LlmEngine interface, ViewModel
-│   ├── src/androidMain/kotlin/   # AndroidLlamaCppEngine (JNI wrapper)
+│   ├── src/commonMain/kotlin/    # LlmEngine interface, ViewModel, ModelRepository
+│   ├── src/androidMain/kotlin/   # AndroidLlamaCppEngine (JNI wrapper), ModelRepository.android
+│   ├── src/iosMain/kotlin/       # IosLlamaCppEngine, ModelRepository.ios
 │   └── src/androidMain/cpp/      # JNI bridge (llama_jni.cpp, CMakeLists.txt)
 ├── composeApp/
-│   ├── src/commonMain/kotlin/    # App.kt (UI)
+│   ├── src/commonMain/kotlin/    # App.kt (UI with download progress)
 │   └── src/androidMain/kotlin/   # MainActivity
 ```
 
@@ -140,22 +143,80 @@ E LlamaJNI: loadModelNative: Failed to load
 ```
 Cause: File owned by shell user, app cannot access
 
-**Attempt 3: App's External Files Directory**
+**Attempt 3: App's External Files Directory** ✅
 ```bash
-adb push model.gguf /sdcard/Android/data/com.example.edgeqslm/files/
+adb push model.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
 ```
-Status: Testing in progress
+Status: **WORKING** - No permission issues
 
 ### 6.2 Permission Fixes Applied
 
 - Added `READ_EXTERNAL_STORAGE` permission
+- Added `INTERNET` and `ACCESS_NETWORK_STATE` permissions
+- Added `POST_NOTIFICATIONS` permission (Android 13+)
 - Set `android:requestLegacyExternalStorage="true"`
 - Set `android:largeHeap="true"` for 2GB model
 - Changed default path to app's own directory
 
 ---
 
-## 7. Challenges and Learnings
+## 7. Model Download Feature (2026-01-18)
+
+### 7.1 Feature Overview
+
+Implemented in-app model download from HuggingFace with:
+- Progress bar with percentage
+- Download speed (Mbps)
+- Downloaded/Total size (MB)
+- System notification with progress
+- Model selection dropdown
+- Debug checkbox for testing
+
+### 7.2 Implementation Details
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Common Interface | `ModelRepository.kt` | expect class with DownloadStatus, ModelInfo |
+| Android Impl | `ModelRepository.android.kt` | HttpURLConnection download |
+| iOS Impl | `ModelRepository.ios.kt` | Ktor client download (placeholder) |
+| ViewModel | `LlmViewModel.kt` | Download state management |
+| UI | `App.kt` | Progress bar, model selector, debug checkbox |
+
+### 7.3 Download Issues and Resolutions
+
+| Issue | Cause | Resolution |
+|-------|-------|------------|
+| Google Drive warning page | File >100MB triggers virus scan | Switched to HuggingFace direct URL |
+| Ktor "connection abort" | Ktor memory issues with large files | Replaced with native HttpURLConnection |
+| Read permission error | Scoped storage on Downloads folder | Prioritize app's external files directory |
+| Duplicate model files | No model selection | Added dropdown to select from available models |
+
+### 7.4 Model Sources
+
+| Source | URL | Status |
+|--------|-----|--------|
+| HuggingFace (Official) | `https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q8_0.gguf` | ✅ Working |
+| Google Drive (Custom) | `https://drive.google.com/uc?export=download&id=...` | ❌ Warning page blocks download |
+
+---
+
+## 8. Package Rename (2026-01-18)
+
+Changed package name from `com.example.edgeqslm` to `com.aksoyapps.edgeqslm`.
+
+### Files Updated
+
+| File | Change |
+|------|--------|
+| `composeApp/build.gradle.kts` | namespace and applicationId |
+| `shared/build.gradle.kts` | namespace |
+| `AndroidManifest.xml` | Package references |
+| All Kotlin files | Package declarations |
+| `llama_jni.cpp` | JNI function names |
+
+---
+
+## 9. Challenges and Learnings
 
 | Challenge | Root Cause | Solution |
 |-----------|------------|----------|
@@ -166,12 +227,14 @@ Status: Testing in progress
 | Poor formatting | Missing ChatML template | Added template wrapper |
 | Model load fails | Android scoped storage | Use app's files directory |
 | ADB unauthorized | USB debugging not approved | Accept prompt on device |
+| Google Drive block | Virus scan warning page | Use HuggingFace instead |
+| Ktor download fails | Memory issues with large files | Use native HttpURLConnection |
 
 ---
 
-## 8. Current Status
+## 10. Current Status
 
-### Completed
+### Completed ✅
 - [x] llama.cpp desktop build
 - [x] Model download and INT8 quantization
 - [x] Desktop baseline measurements
@@ -181,19 +244,24 @@ Status: Testing in progress
 - [x] ChatML template support
 - [x] Stop token detection
 - [x] APK build and installation on device
+- [x] Model loading on Android device
+- [x] In-app model download from HuggingFace
+- [x] Download progress UI with speed/size info
+- [x] Model selection dropdown
+- [x] Package rename to com.aksoyapps.edgeqslm
 
-### In Progress
-- [ ] Model loading on Android device (permission debugging)
-
-### Pending
+### In Progress 🔄
 - [ ] Android performance measurements
+
+### Pending 📋
 - [ ] INT4 quantization comparison
 - [ ] GPU/NPU acceleration tests
 - [ ] Multiple device benchmarks
+- [ ] iOS implementation testing
 
 ---
 
-## 9. Metrics Summary Table
+## 11. Metrics Summary Table
 
 | Metric | Desktop (M-series) | Android (Expected) |
 |--------|-------------------|-------------------|
@@ -205,28 +273,37 @@ Status: Testing in progress
 
 ---
 
-## 10. Next Steps
+## 12. Next Steps
 
-1. **Resolve Model Loading**: Fix permission issues on Android device
-2. **Collect Metrics**: Measure TTFT, tokens/sec, memory on device
-3. **INT4 Testing**: Quantize to Q4_0, compare speed vs accuracy
-4. **GPU Offloading**: Test with GGML_OPENCL for Adreno GPUs
-5. **Multi-Device Benchmark**: Test on various Android devices
+1. **Collect Metrics**: Measure TTFT, tokens/sec, memory on device
+2. **INT4 Testing**: Quantize to Q4_0, compare speed vs accuracy
+3. **GPU Offloading**: Test with GGML_OPENCL for Adreno GPUs
+4. **Multi-Device Benchmark**: Test on various Android devices
+5. **iOS Testing**: Verify iOS build and functionality
 6. **Documentation**: Complete thesis measurements appendix
 
 ---
 
-## Appendix: Key Files Modified
+## Appendix A: Key Files Modified
 
 | File | Purpose |
 |------|---------|
 | `shared/src/androidMain/cpp/CMakeLists.txt` | llama.cpp cross-compile config |
 | `shared/src/androidMain/cpp/llama_jni.cpp` | JNI bridge with ChatML support |
 | `shared/src/androidMain/kotlin/.../AndroidLlamaCppEngine.kt` | Kotlin JNI wrapper |
+| `shared/src/androidMain/kotlin/.../ModelRepository.android.kt` | Android download implementation |
 | `shared/src/commonMain/kotlin/.../LlmEngine.kt` | Interface with metrics |
-| `shared/src/commonMain/kotlin/.../LlmViewModel.kt` | State management |
-| `composeApp/src/commonMain/kotlin/.../App.kt` | UI with metrics dashboard |
+| `shared/src/commonMain/kotlin/.../LlmViewModel.kt` | State management with download |
+| `shared/src/commonMain/kotlin/.../ModelRepository.kt` | Cross-platform download interface |
+| `composeApp/src/commonMain/kotlin/.../App.kt` | UI with metrics and download progress |
 | `gradle.properties` | Java 17 path configuration |
+
+## Appendix B: Git Branch Structure
+
+| Branch | Description |
+|--------|-------------|
+| `main` | Stable base project |
+| `feature/model-download` | Model download feature with progress UI |
 
 ---
 

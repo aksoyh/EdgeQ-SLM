@@ -26,6 +26,9 @@ kotlin {
             implementation(libs.kotlinx.coroutines.android)
             implementation(libs.ktor.client.android)
             implementation(libs.androidx.core.ktx)
+            implementation(libs.onnxruntime.android)
+            implementation(libs.mlkit.text.recognition)
+            implementation(libs.workmanager.ktx)
         }
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)

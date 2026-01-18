@@ -13,6 +13,10 @@ kotlin = "1.9.22"
 kotlinx-coroutines = "1.8.0"
 ktor = "2.3.8" # If needed for networking, keeping for standard KMP setup
 voyager = "1.0.0" # Navigation
+onnxruntime = "1.16.3" # ONNX Runtime for ML inference
+mlkit-text = "16.0.0" # ML Kit Text Recognition
+workmanager = "2.9.0" # WorkManager for background tasks
+coil = "2.5.0" # Image loading
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
@@ -32,6 +36,10 @@ ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
 ktor-client-android = { module = "io.ktor:ktor-client-android", version.ref = "ktor" }
 ktor-client-darwin = { module = "io.ktor:ktor-client-darwin", version.ref = "ktor" }
+onnxruntime-android = { module = "com.microsoft.onnxruntime:onnxruntime-android", version.ref = "onnxruntime" }
+mlkit-text-recognition = { module = "com.google.mlkit:text-recognition", version.ref = "mlkit-text" }
+workmanager-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "workmanager" }
+coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

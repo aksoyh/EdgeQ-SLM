@@ -1,4 +1,4 @@
-package com.example.edgeqslm
+package com.aksoyapps.edgeqslm
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -128,6 +128,8 @@ private fun HeaderSection(uiState: UiState) {
 
 @Composable
 private fun ModelStatusCard(uiState: UiState, viewModel: LlmViewModel) {
+    var showModelDropdown by remember { mutableStateOf(false) }
+    
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -166,10 +168,61 @@ private fun ModelStatusCard(uiState: UiState, viewModel: LlmViewModel) {
                 }
             }
             
+            // Model Selector (if multiple models available)
+            if (uiState.availableModels.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                Box {
+                    OutlinedButton(
+                        onClick = { showModelDropdown = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        val selectedModel = uiState.availableModels.getOrNull(uiState.selectedModelIndex)
+                        val displayName = selectedModel?.name?.take(35) ?: "Select Model"
+                        Text(
+                            text = "📁 $displayName",
+                            maxLines = 1
+                        )
+                    }
+                    
+                    DropdownMenu(
+                        expanded = showModelDropdown,
+                        onDismissRequest = { showModelDropdown = false }
+                    ) {
+                        uiState.availableModels.forEachIndexed { index, model ->
+                            DropdownMenuItem(
+                                text = { 
+                                    Column {
+                                        Text(
+                                            text = model.name,
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                        val sizeMB = model.sizeBytes / (1024 * 1024)
+                                        Text(
+                                            text = "${sizeMB} MB",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    viewModel.selectModel(index)
+                                    showModelDropdown = false
+                                },
+                                leadingIcon = {
+                                    Text(if (model.isDownloadable) "📥" else "📄")
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            
             if (uiState.modelPath.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Path: ${uiState.modelPath}",
+                    text = "Path: ${uiState.modelPath.substringAfterLast("/")}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontFamily = FontFamily.Monospace,
@@ -191,6 +244,27 @@ private fun ModelStatusCard(uiState: UiState, viewModel: LlmViewModel) {
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
+            }
+            
+            // Debug Checkbox (for testing download UI)
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clickable { viewModel.setDebugForceNoModel(!uiState.debugForceNoModel) }
+                    .padding(vertical = 4.dp)
+            ) {
+                Checkbox(
+                    checked = uiState.debugForceNoModel,
+                    onCheckedChange = { viewModel.setDebugForceNoModel(it) },
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "🔧 Debug: Force 'No Model'",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -318,38 +392,138 @@ private fun PromptInputSection(uiState: UiState, viewModel: LlmViewModel) {
 
 @Composable
 private fun ActionButtonsRow(uiState: UiState, viewModel: LlmViewModel) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // Load Model Button
-        Button(
-            onClick = { viewModel.loadModel() },
-            enabled = !uiState.isLoading && !uiState.isModelLoaded,
-            modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.secondary
-            )
-        ) {
-            Text("📦 Load Model")
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        
+        // Download Progress Bar (shown during download)
+        if (uiState.isDownloading) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "⬇️ Downloading Model...",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = uiState.downloadProgress,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(4.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Progress percentage
+                    Text(
+                        text = "${(uiState.downloadProgress * 100).toInt()}%",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    // Download stats: MB / Total MB
+                    val downloadedMB = uiState.downloadedBytes / (1024 * 1024)
+                    val totalMB = uiState.downloadTotalBytes / (1024 * 1024)
+                    Text(
+                        text = "${downloadedMB} MB / ${totalMB} MB",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    
+                    // Download speed
+                    val speedMbps = (uiState.downloadSpeedBytesPerSec * 8) / (1024 * 1024.0)
+                    Text(
+                        text = "${"%.1f".format(speedMbps)} Mbps",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            }
         }
         
-        // Generate Button
-        Button(
-            onClick = { viewModel.generate() },
-            enabled = !uiState.isLoading && uiState.isModelLoaded,
-            modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(12.dp)
+        // Main Action Buttons Row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (uiState.isLoading && uiState.isModelLoaded) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    color = MaterialTheme.colorScheme.onPrimary,
-                    strokeWidth = 2.dp
-                )
-            } else {
-                Text("⚡ Generate")
+            // Download / Check File / Load Model Button (conditional)
+            if (!uiState.modelExists && !uiState.isDownloading) {
+                // Download Button
+                Button(
+                    onClick = { viewModel.downloadModel() },
+                    enabled = !uiState.isLoading,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.tertiary
+                    )
+                ) {
+                    Text("☁️ Download")
+                }
+                
+                // Check File Button
+                OutlinedButton(
+                    onClick = { viewModel.checkModelExistence() },
+                    enabled = !uiState.isLoading,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("🔄 Check")
+                }
+            } else if (uiState.modelExists) {
+                // Load Model Button
+                Button(
+                    onClick = { viewModel.loadModel() },
+                    enabled = !uiState.isLoading && !uiState.isModelLoaded,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    if (uiState.isLoading && !uiState.isModelLoaded) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = MaterialTheme.colorScheme.onSecondary,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("📦 Load Model")
+                    }
+                }
+            }
+            
+            // Generate Button (always visible when model loaded)
+            if (uiState.isModelLoaded) {
+                Button(
+                    onClick = { viewModel.generate() },
+                    enabled = !uiState.isLoading,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    if (uiState.isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("⚡ Generate")
+                    }
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-package com.example.edgeqslm
+package com.aksoyapps.edgeqslm
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -17,7 +17,7 @@ class MainActivity : ComponentActivity() {
         private const val PERMISSION_REQUEST_CODE = 1001
         
         // Default model path - app's external files directory (no special permissions needed)
-        private const val DEFAULT_MODEL_PATH = "/sdcard/Android/data/com.example.edgeqslm/files/qwen-q8_0.gguf"
+        private const val DEFAULT_MODEL_PATH = "/sdcard/Android/data/com.aksoyapps.edgeqslm/files/qwen-q8_0.gguf"
     }
     
     private lateinit var viewModel: LlmViewModel
@@ -31,11 +31,15 @@ class MainActivity : ComponentActivity() {
         // Initialize the engine
         val engine = AndroidLlamaCppEngine()
 
+        // Initialize repository for model management
+        val repository = ModelRepository()
+        repository.init(this)
+        
         // Determine model path
         // Priority: 1. Downloads folder, 2. App's external files dir
         val modelPath = findModelPath()
         
-        viewModel = LlmViewModel(engine, modelPath)
+        viewModel = LlmViewModel(engine, modelPath, repository)
 
         setContent { App(viewModel) }
     }

@@ -1,4 +1,4 @@
-package com.example.edgeqslm
+package com.aksoyapps.edgeqslm
 
 class IosLlamaCppEngine : LlmEngine {
     override val isSimulation: Boolean = true

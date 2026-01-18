@@ -20,15 +20,21 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             implementation(libs.kotlinx.coroutines.core)
+            implementation(libs.ktor.client.core)
         }
         androidMain.dependencies {
             implementation(libs.kotlinx.coroutines.android)
+            implementation(libs.ktor.client.android)
+            implementation(libs.androidx.core.ktx)
+        }
+        iosMain.dependencies {
+            implementation(libs.ktor.client.darwin)
         }
     }
 }
 
 android {
-    namespace = "com.example.edgeqslm.shared"
+    namespace = "com.aksoyapps.edgeqslm.shared"
     compileSdk = 34
 
     defaultConfig {

@@ -1,4 +1,4 @@
-package com.example.edgeqslm
+package com.aksoyapps.edgeqslm
 
 import android.os.Debug
 import kotlin.system.measureTimeMillis

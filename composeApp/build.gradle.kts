@@ -35,11 +35,11 @@ kotlin {
 }
 
 android {
-    namespace = "com.example.edgeqslm"
+    namespace = "com.aksoyapps.edgeqslm"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.edgeqslm"
+        applicationId = "com.aksoyapps.edgeqslm"
         minSdk = 24
         targetSdk = 34
         versionCode = 1

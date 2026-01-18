@@ -79,7 +79,7 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_example_edgeqslm_AndroidLlamaCppEngine_loadModelNative(
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_loadModelNative(
         JNIEnv* env, jobject thiz, jstring modelPath) {
 
     const char* path = env->GetStringUTFChars(modelPath, nullptr);
@@ -129,7 +129,7 @@ Java_com_example_edgeqslm_AndroidLlamaCppEngine_loadModelNative(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_example_edgeqslm_AndroidLlamaCppEngine_generateNative(
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_generateNative(
         JNIEnv* env, jobject thiz, jstring prompt,
         jint maxTokens, jfloat temperature, jfloat topP,
         jfloat repeatPenalty, jboolean useChatTemplate) {
@@ -239,7 +239,7 @@ Java_com_example_edgeqslm_AndroidLlamaCppEngine_generateNative(
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_edgeqslm_AndroidLlamaCppEngine_unloadNative(JNIEnv* env, jobject thiz) {
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_unloadNative(JNIEnv* env, jobject thiz) {
     LOGI("unloadNative: Unloading");
     if (g_context) { llama_free(g_context); g_context = nullptr; }
     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
@@ -251,22 +251,22 @@ Java_com_example_edgeqslm_AndroidLlamaCppEngine_unloadNative(JNIEnv* env, jobjec
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_example_edgeqslm_AndroidLlamaCppEngine_getPrefillTimeNative(JNIEnv* env, jobject thiz) {
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_getPrefillTimeNative(JNIEnv* env, jobject thiz) {
     return g_prefill_time_ms;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_example_edgeqslm_AndroidLlamaCppEngine_getDecodeTimeNative(JNIEnv* env, jobject thiz) {
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_getDecodeTimeNative(JNIEnv* env, jobject thiz) {
     return g_decode_time_ms;
 }
 
 JNIEXPORT jint JNICALL
-Java_com_example_edgeqslm_AndroidLlamaCppEngine_getTokensGeneratedNative(JNIEnv* env, jobject thiz) {
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_getTokensGeneratedNative(JNIEnv* env, jobject thiz) {
     return g_tokens_generated;
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_example_edgeqslm_AndroidLlamaCppEngine_isModelLoadedNative(JNIEnv* env, jobject thiz) {
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_isModelLoadedNative(JNIEnv* env, jobject thiz) {
     return (g_model != nullptr && g_context != nullptr) ? JNI_TRUE : JNI_FALSE;
 }
 

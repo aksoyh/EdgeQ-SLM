@@ -1,4 +1,4 @@
-package com.example.edgeqslm
+package com.aksoyapps.edgeqslm
 
 /**
  * Request parameters for text generation.

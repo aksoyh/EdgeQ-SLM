@@ -31,6 +31,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.gestures.detectTapGestures
 import coil.compose.AsyncImage
 import java.io.File
 
@@ -43,6 +44,7 @@ fun PhotoSearchScreen(
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
     onStartIndexing: () -> Unit,
+    onForceIndexing: () -> Unit,
     onRefresh: () -> Unit,
     onTabChange: (Int) -> Unit,
     onPhotoClick: (String) -> Unit,
@@ -51,11 +53,13 @@ fun PhotoSearchScreen(
     modifier: Modifier = Modifier
 ) {
     var selectedPhoto by remember { mutableStateOf<PhotoSearchResultUi?>(null) }
+    val scrollState = rememberScrollState()
     
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(brush = Brush.verticalGradient(colors = listOf(Color(0xFF0D1117), Color(0xFF161B22))))
+            .verticalScroll(scrollState)
             .padding(16.dp)
     ) {
         Text(
@@ -66,7 +70,7 @@ fun PhotoSearchScreen(
             modifier = Modifier.padding(bottom = 8.dp)
         )
         
-        StatusCard(uiState, onStartIndexing, onRefresh, onSelectFolder)
+        StatusCard(uiState, onStartIndexing, onForceIndexing, onRefresh, onSelectFolder)
         
         Spacer(modifier = Modifier.height(12.dp))
         
@@ -86,8 +90,8 @@ fun PhotoSearchScreen(
         Spacer(modifier = Modifier.height(12.dp))
         
         when (uiState.selectedTab) {
-            0 -> PhotoFilesList(uiState.photoFiles, onPhotoClick)
-            1 -> SearchTab(uiState, onQueryChange, onSearch) { selectedPhoto = it }
+            0 -> PhotoFilesListScrollable(uiState.photoFiles, onPhotoClick)
+            1 -> SearchTabScrollable(uiState, onQueryChange, onSearch) { selectedPhoto = it }
         }
         
         uiState.error?.let { error ->
@@ -297,6 +301,7 @@ private fun FullscreenImageViewer(
 private fun StatusCard(
     uiState: PhotoSearchUiState,
     onStartIndexing: () -> Unit,
+    onForceIndexing: () -> Unit,
     onRefresh: () -> Unit,
     onSelectFolder: () -> Unit
 ) {
@@ -324,7 +329,21 @@ private fun StatusCard(
             
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
                 Text("✅ ${uiState.indexedCount}/${uiState.totalPhotos} indexed", fontSize = 14.sp, color = Color(0xFF3FB950), fontWeight = FontWeight.Medium)
-                Text(uiState.modelLoadingMessage, fontSize = 11.sp, color = Color(0xFF8B949E))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (uiState.isModelLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = Color(0xFFD29922)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    Text(
+                        uiState.modelLoadingMessage, 
+                        fontSize = 11.sp, 
+                        color = if (uiState.isModelLoading) Color(0xFFD29922) else Color(0xFF8B949E)
+                    )
+                }
             }
             
             if (uiState.isIndexing) {
@@ -340,11 +359,19 @@ private fun StatusCard(
             
             if (!uiState.isIndexing) {
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onStartIndexing, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF238636)), modifier = Modifier.weight(1f), contentPadding = PaddingValues(8.dp)) {
-                        Text("🔄 Index", fontSize = 12.sp)
-                    }
-                    OutlinedButton(onClick = onRefresh, modifier = Modifier.weight(1f), contentPadding = PaddingValues(8.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF58A6FF))) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(36.dp)) {
+                    // Force Indexing button with long-press
+                    ForceIndexButton(
+                        onNormalClick = onStartIndexing,
+                        onForceIndex = onForceIndexing,
+                        modifier = Modifier.weight(1f).fillMaxHeight()
+                    )
+                    OutlinedButton(
+                        onClick = onRefresh, 
+                        modifier = Modifier.weight(1f).fillMaxHeight(), 
+                        contentPadding = PaddingValues(8.dp), 
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF58A6FF))
+                    ) {
                         Text("🔃 Refresh", fontSize = 12.sp)
                     }
                 }
@@ -368,33 +395,59 @@ private fun PhotoFilesList(photos: List<PhotoFileUi>, onPhotoClick: (String) -> 
     
     LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         items(photos) { photo ->
-            Row(
-                modifier = Modifier.fillMaxWidth().background(Color(0xFF21262D), RoundedCornerShape(8.dp)).clickable { onPhotoClick(photo.path) }.padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Thumbnail
-                Card(modifier = Modifier.size(48.dp), shape = RoundedCornerShape(6.dp)) {
-                    AsyncImage(
-                        model = File(photo.path),
-                        contentDescription = photo.name,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                }
-                
-                Spacer(modifier = Modifier.width(10.dp))
-                
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(photo.name, fontSize = 13.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("${photo.sizeKb} KB", fontSize = 10.sp, color = Color(0xFF8B949E))
-                }
-                
-                Box(
-                    modifier = Modifier.background(if (photo.isIndexed) Color(0xFF238636) else Color(0xFF30363D), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 3.dp)
-                ) {
-                    Text(if (photo.isIndexed) "✅" else "⏳", fontSize = 10.sp)
-                }
+            PhotoFileRow(photo, onPhotoClick)
+        }
+    }
+}
+
+@Composable
+private fun PhotoFilesListScrollable(photos: List<PhotoFileUi>, onPhotoClick: (String) -> Unit) {
+    if (photos.isEmpty()) {
+        Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("📭", fontSize = 40.sp)
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("Enable 'All Files Access' in Settings\nthen tap Refresh", fontSize = 13.sp, color = Color(0xFF8B949E), textAlign = TextAlign.Center)
             }
+        }
+        return
+    }
+    
+    // Use regular Column for scrollable parent compatibility
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        photos.forEach { photo ->
+            PhotoFileRow(photo, onPhotoClick)
+        }
+    }
+}
+
+@Composable
+private fun PhotoFileRow(photo: PhotoFileUi, onPhotoClick: (String) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().background(Color(0xFF21262D), RoundedCornerShape(8.dp)).clickable { onPhotoClick(photo.path) }.padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Thumbnail
+        Card(modifier = Modifier.size(48.dp), shape = RoundedCornerShape(6.dp)) {
+            AsyncImage(
+                model = File(photo.path),
+                contentDescription = photo.name,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        }
+        
+        Spacer(modifier = Modifier.width(10.dp))
+        
+        Column(modifier = Modifier.weight(1f)) {
+            Text(photo.name, fontSize = 13.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("${photo.sizeKb} KB", fontSize = 10.sp, color = Color(0xFF8B949E))
+        }
+        
+        Box(
+            modifier = Modifier.background(if (photo.isIndexed) Color(0xFF238636) else Color(0xFF30363D), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 3.dp)
+        ) {
+            Text(if (photo.isIndexed) "✅" else "⏳", fontSize = 10.sp)
         }
     }
 }
@@ -509,5 +562,214 @@ private fun SearchTab(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SearchTabScrollable(
+    uiState: PhotoSearchUiState,
+    onQueryChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    onPhotoClick: (PhotoSearchResultUi) -> Unit
+) {
+    Column {
+        OutlinedTextField(
+            value = uiState.searchQuery,
+            onValueChange = onQueryChange,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("Search text in photos...", color = Color(0xFF6E7681)) },
+            leadingIcon = {
+                if (uiState.isSearching) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFF58A6FF), strokeWidth = 2.dp)
+                else Text("🔍", fontSize = 18.sp)
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color(0xFF58A6FF),
+                unfocusedBorderColor = Color(0xFF30363D),
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                cursorColor = Color(0xFF58A6FF)
+            ),
+            shape = RoundedCornerShape(12.dp)
+        )
+        
+        Spacer(modifier = Modifier.height(12.dp))
+        
+        if (uiState.searchResults.isNotEmpty()) {
+            Text("Found ${uiState.searchResults.size} results", fontSize = 12.sp, color = Color(0xFF8B949E), modifier = Modifier.padding(bottom = 8.dp))
+            
+            // Use Column with chunked rows for scrollable parent compatibility
+            val chunkedResults = uiState.searchResults.chunked(2)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                chunkedResults.forEach { rowItems ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        rowItems.forEach { result ->
+                            SearchResultCard(result, onPhotoClick, Modifier.weight(1f))
+                        }
+                        // Add empty spacer if odd number
+                        if (rowItems.size == 1) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        } else if (uiState.searchQuery.isNotBlank() && !uiState.isSearching) {
+            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                Text("No results for \"${uiState.searchQuery}\"", fontSize = 14.sp, color = Color(0xFF8B949E))
+            }
+        } else {
+            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("🔍", fontSize = 40.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Search text in indexed photos", fontSize = 13.sp, color = Color(0xFF8B949E))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSearchResultUi) -> Unit, modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier.height(200.dp).clickable { onPhotoClick(result) },
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF21262D))
+    ) {
+        Column {
+            Box(modifier = Modifier.fillMaxWidth().height(100.dp)) {
+                AsyncImage(
+                    model = File(result.filePath),
+                    contentDescription = result.fileName,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+                // Match type badge (top-left)
+                val badgeColor = when (result.matchType) {
+                    MatchType.CLIP -> Color(0xFF8957E5)
+                    MatchType.HYBRID -> Color(0xFFD29922)
+                    else -> Color(0xFF58A6FF)
+                }
+                Box(
+                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                        .background(badgeColor.copy(alpha = 0.95f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                ) {
+                    Text(result.matchType.name, fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                }
+                // Score badge (top-right)
+                Box(
+                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                        .background(Color(0xFF238636).copy(alpha = 0.95f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                ) {
+                    Text("${(result.score * 100).toInt()}%", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+            // Match reason
+            if (result.matchReason.isNotBlank()) {
+                Text(
+                    text = result.matchReason.take(50),
+                    fontSize = 10.sp,
+                    color = Color(0xFFADBBC4),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+            // OCR text preview
+            Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 8.dp)) {
+                Text(
+                    text = result.ocrText?.take(40) ?: "No OCR text",
+                    fontSize = 10.sp,
+                    color = if (result.ocrText != null) Color(0xFF8B949E) else Color(0xFF6E7681),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Force Index Button with long-press detection
+ * Normal click: Regular indexing (skip already indexed)
+ * Long press (5s): Force re-index all photos
+ */
+@Composable
+private fun ForceIndexButton(
+    onNormalClick: () -> Unit,
+    onForceIndex: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isPressed by remember { mutableStateOf(false) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var buttonText by remember { mutableStateOf("🔄 Index") }
+    
+    // Animation for progress
+    LaunchedEffect(isPressed) {
+        if (isPressed) {
+            // Start progress after 2 seconds, complete at 5 seconds
+            val startDelay = 2000L
+            val progressDuration = 3000L // 2s to 5s = 3s
+            
+            kotlinx.coroutines.delay(startDelay)
+            buttonText = "⚡ Force Indexing..."
+            
+            val startTime = System.currentTimeMillis()
+            while (isPressed && progress < 1f) {
+                val elapsed = System.currentTimeMillis() - startTime
+                progress = (elapsed.toFloat() / progressDuration).coerceIn(0f, 1f)
+                kotlinx.coroutines.delay(50)
+            }
+            
+            if (progress >= 1f) {
+                onForceIndex()
+            }
+        } else {
+            progress = 0f
+            buttonText = "🔄 Index"
+        }
+    }
+    
+    Box(
+        modifier = modifier
+            .height(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xFF238636))
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        isPressed = true
+                        val released = tryAwaitRelease()
+                        if (released && progress < 0.1f) {
+                            // Short press - normal indexing
+                            onNormalClick()
+                        }
+                        isPressed = false
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        // Progress overlay (left to right fill)
+        if (progress > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(progress)
+                    .align(Alignment.CenterStart)
+                    .background(Color(0xFF2EA043))
+            )
+        }
+        
+        Text(
+            text = buttonText,
+            fontSize = 12.sp,
+            color = Color.White,
+            fontWeight = FontWeight.Medium
+        )
     }
 }

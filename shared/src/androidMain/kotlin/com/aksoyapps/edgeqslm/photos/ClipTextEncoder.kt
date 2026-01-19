@@ -105,7 +105,7 @@ class ClipTextEncoder(private val context: Context) {
     }
     
     /**
-     * Simple tokenization for CLIP
+     * Tokenization for CLIP - vocabulary uses word</w> format
      */
     private fun tokenize(text: String): Pair<IntArray, IntArray> {
         val inputIds = IntArray(maxTokens) { 0 }
@@ -113,23 +113,32 @@ class ClipTextEncoder(private val context: Context) {
         
         val startToken = 49406  // startoftext
         val endToken = 49407    // endoftext
-        val padToken = 0
         
         inputIds[0] = startToken
         attentionMask[0] = 1
         
-        // Simple word-level tokenization
-        val words = text.lowercase().split(Regex("\\s+"))
+        // Clean and split text
+        val cleanText = text.lowercase().replace(Regex("[^a-z0-9\\s]"), " ")
+        val words = cleanText.split(Regex("\\s+")).filter { it.isNotBlank() }
         var pos = 1
+        
+        android.util.Log.d("ClipTextEncoder", "Tokenizing: '$text' -> words: $words")
         
         for (word in words) {
             if (pos >= maxTokens - 1) break
             
-            // Look up in vocabulary or use unknown token
-            val tokenId = vocab?.get(word) ?: vocab?.get(word + "</w>") ?: 0
-            inputIds[pos] = tokenId
-            attentionMask[pos] = 1
-            pos++
+            // CLIP vocab uses word</w> format for complete words
+            // Try with </w> suffix first (complete word), then without (subword)
+            val wordWithSuffix = "$word</w>"
+            val tokenId = vocab?.get(wordWithSuffix) ?: vocab?.get(word) ?: 0
+            
+            android.util.Log.d("ClipTextEncoder", "Word: '$word' -> tokenId: $tokenId (tried: '$wordWithSuffix')")
+            
+            if (tokenId > 0) {
+                inputIds[pos] = tokenId
+                attentionMask[pos] = 1
+                pos++
+            }
         }
         
         // Add end token
@@ -137,6 +146,8 @@ class ClipTextEncoder(private val context: Context) {
             inputIds[pos] = endToken
             attentionMask[pos] = 1
         }
+        
+        android.util.Log.d("ClipTextEncoder", "Final tokens: ${inputIds.take(pos + 1).toList()}")
         
         return Pair(inputIds, attentionMask)
     }

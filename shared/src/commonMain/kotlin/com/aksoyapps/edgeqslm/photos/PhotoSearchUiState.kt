@@ -24,8 +24,9 @@ data class PhotoSearchUiState(
     val totalPhotos: Int = 0,
     
     // Model status
+    val isModelLoading: Boolean = true,  // True while CLIP models are loading
     val isModelLoaded: Boolean = false,
-    val modelLoadingMessage: String = "",
+    val modelLoadingMessage: String = "Loading CLIP models...",
     
     // Folder
     val scanFolderPath: String = "",

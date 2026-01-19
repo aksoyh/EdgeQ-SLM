@@ -57,22 +57,29 @@ class PhotoSearchViewModel(private val context: Context) {
             val clipModelsExist = File(clipImageModelPath).exists() && File(clipTextModelPath).exists()
             
             val (modelLoaded, modeMessage) = if (clipModelsExist) {
+                // Update UI to show loading state
+                _uiState.value = _uiState.value.copy(
+                    isModelLoading = true,
+                    modelLoadingMessage = "⏳ Loading CLIP models (~660MB)..."
+                )
+                
                 // Try to initialize CLIP models
                 android.util.Log.d("PhotoSearchVM", "Initializing CLIP models...")
                 val success = photoIndexer?.initialize(clipImageModelPath, clipTextModelPath, clipVocabPath) ?: false
                 android.util.Log.d("PhotoSearchVM", "CLIP init result: $success")
                 if (success) {
-                    Pair(true, "CLIP + OCR mode")
+                    Pair(true, "✅ CLIP + OCR mode")
                 } else {
-                    Pair(true, "OCR only (CLIP failed)")
+                    Pair(true, "⚠️ OCR only (CLIP failed)")
                 }
             } else {
                 android.util.Log.d("PhotoSearchVM", "CLIP models not found")
-                Pair(true, "OCR only (no CLIP models)")
+                Pair(true, "📝 OCR only (no CLIP)")
             }
             
             _uiState.value = _uiState.value.copy(
                 scanFolderPath = defaultFolder,
+                isModelLoading = false,
                 isModelLoaded = modelLoaded,
                 modelLoadingMessage = modeMessage
             )
@@ -192,6 +199,48 @@ class PhotoSearchViewModel(private val context: Context) {
                 _uiState.value = _uiState.value.copy(
                     isIndexing = false,
                     error = "Indexing error: ${e.message}"
+                )
+            }
+        }
+    }
+    
+    /**
+     * Force re-index all photos - deletes database and re-indexes with CLIP
+     */
+    fun forceIndex() {
+        if (_uiState.value.isIndexing) return
+        
+        indexingJob = scope.launch(Dispatchers.IO) {
+            android.util.Log.d("PhotoSearchVM", "FORCE INDEXING: Clearing database and re-indexing all photos")
+            
+            _uiState.value = _uiState.value.copy(
+                isIndexing = true,
+                indexingProgress = 0f,
+                indexingMessage = "Force indexing: clearing database..."
+            )
+            
+            try {
+                // Clear the database
+                photoIndexer?.clearDatabase()
+                
+                // Re-index all photos
+                photoIndexer?.indexFolder()?.collect { progress ->
+                    _uiState.value = _uiState.value.copy(
+                        indexingProgress = progress.progress,
+                        indexingMessage = "Force: ${progress.message}",
+                        totalPhotos = progress.total
+                    )
+                    
+                    if (progress.isComplete) {
+                        _uiState.value = _uiState.value.copy(isIndexing = false)
+                        refreshPhotoList()
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("PhotoSearchVM", "Force indexing error: ${e.message}", e)
+                _uiState.value = _uiState.value.copy(
+                    isIndexing = false,
+                    error = "Force indexing error: ${e.message}"
                 )
             }
         }

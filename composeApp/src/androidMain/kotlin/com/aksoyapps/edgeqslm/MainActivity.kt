@@ -1,6 +1,7 @@
 package com.aksoyapps.edgeqslm
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -15,8 +16,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.aksoyapps.edgeqslm.photos.PhotoSearchScreen
@@ -188,27 +193,32 @@ fun MainAppWithTabs(
     ) {
         Scaffold(
             bottomBar = {
-                NavigationBar(containerColor = Color(0xFF1E1E1E)) {
-                    NavigationBarItem(
-                        icon = { Text("🤖", style = MaterialTheme.typography.titleLarge) },
-                        label = { Text("LLM") },
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Color(0xFF58A6FF),
-                            indicatorColor = Color(0xFF21262D)
+                Column {
+                    // Resource Status Bar
+                    ResourceStatusBar()
+                    
+                    NavigationBar(containerColor = Color(0xFF1E1E1E)) {
+                        NavigationBarItem(
+                            icon = { Text("🤖", style = MaterialTheme.typography.titleLarge) },
+                            label = { Text("LLM") },
+                            selected = selectedTab == 0,
+                            onClick = { selectedTab = 0 },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = Color(0xFF58A6FF),
+                                indicatorColor = Color(0xFF21262D)
+                            )
                         )
-                    )
-                    NavigationBarItem(
-                        icon = { Text("📷", style = MaterialTheme.typography.titleLarge) },
-                        label = { Text("Photos") },
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Color(0xFF58A6FF),
-                            indicatorColor = Color(0xFF21262D)
+                        NavigationBarItem(
+                            icon = { Text("📷", style = MaterialTheme.typography.titleLarge) },
+                            label = { Text("Photos") },
+                            selected = selectedTab == 1,
+                            onClick = { selectedTab = 1 },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = Color(0xFF58A6FF),
+                                indicatorColor = Color(0xFF21262D)
+                            )
                         )
-                    )
+                    }
                 }
             }
         ) { padding ->
@@ -227,6 +237,7 @@ fun MainAppWithTabs(
                             onQueryChange = { photoSearchViewModel.updateQueryAndSearch(it) },
                             onSearch = { photoSearchViewModel.search() },
                             onStartIndexing = { photoSearchViewModel.startIndexing() },
+                            onForceIndexing = { photoSearchViewModel.forceIndex() },
                             onRefresh = { photoSearchViewModel.refreshPhotoList() },
                             onTabChange = { photoSearchViewModel.selectTab(it) },
                             onPhotoClick = { _ -> },
@@ -239,3 +250,129 @@ fun MainAppWithTabs(
         }
     }
 }
+
+/**
+ * Resource Status Bar showing CPU and RAM usage
+ */
+@Composable
+private fun ResourceStatusBar() {
+    val context = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    var cpuUsage by remember { mutableFloatStateOf(0f) }
+    var appCpuUsage by remember { mutableFloatStateOf(0f) }
+    var deviceRamUsed by remember { mutableLongStateOf(0L) }
+    var deviceRamTotal by remember { mutableLongStateOf(0L) }
+    var appRamUsed by remember { mutableLongStateOf(0L) }
+    
+    // For app CPU calculation
+    var lastCpuTime by remember { mutableLongStateOf(0L) }
+    var lastWallTime by remember { mutableLongStateOf(0L) }
+    
+    // Update resource usage periodically
+    LaunchedEffect(Unit) {
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val numCores = Runtime.getRuntime().availableProcessors()
+        
+        while (true) {
+            try {
+                // Force tick update to trigger recomposition
+                tick++
+                
+                // Get device RAM info
+                val memInfo = android.app.ActivityManager.MemoryInfo()
+                activityManager.getMemoryInfo(memInfo)
+                deviceRamTotal = memInfo.totalMem / (1024 * 1024) // MB
+                deviceRamUsed = (memInfo.totalMem - memInfo.availMem) / (1024 * 1024) // MB
+                
+                // Get app RAM - use native heap + java heap
+                val nativeHeap = android.os.Debug.getNativeHeapAllocatedSize() / (1024 * 1024)
+                val runtime = Runtime.getRuntime()
+                val javaHeap = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
+                appRamUsed = nativeHeap + javaHeap
+                
+                // System CPU - use load average (works on Android)
+                try {
+                    val loadReader = java.io.BufferedReader(java.io.FileReader("/proc/loadavg"))
+                    val loadLine = loadReader.readLine()
+                    loadReader.close()
+                    val load1min = loadLine.split(" ")[0].toFloatOrNull() ?: 0f
+                    // Convert load to percentage (load / numCores * 100)
+                    cpuUsage = ((load1min / numCores) * 100f).coerceIn(0f, 100f)
+                } catch (e: Exception) {
+                    cpuUsage = 0f
+                }
+                
+                // App CPU - use Debug.threadCpuTimeNanos
+                val currentCpuTime = android.os.Debug.threadCpuTimeNanos()
+                val currentWallTime = System.nanoTime()
+                
+                if (lastCpuTime > 0 && lastWallTime > 0) {
+                    val cpuDiff = currentCpuTime - lastCpuTime
+                    val wallDiff = currentWallTime - lastWallTime
+                    
+                    if (wallDiff > 0) {
+                        appCpuUsage = ((cpuDiff.toFloat() / wallDiff.toFloat()) * 100f).coerceIn(0f, 100f)
+                    }
+                }
+                
+                lastCpuTime = currentCpuTime
+                lastWallTime = currentWallTime
+                
+            } catch (e: Exception) {
+                android.util.Log.e("ResourceBar", "Error: ${e.message}")
+            }
+            kotlinx.coroutines.delay(2000) // Update every 2 seconds
+        }
+    }
+    
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF161B22))
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Device CPU
+        ResourceItem(
+            icon = "📊",
+            label = "CPU",
+            value = "${cpuUsage.toInt()}%",
+            color = if (cpuUsage > 80) Color(0xFFF85149) else Color(0xFF58A6FF)
+        )
+        
+        // App CPU
+        ResourceItem(
+            icon = "⚡",
+            label = "App CPU",
+            value = "${appCpuUsage.toInt()}%",
+            color = if (appCpuUsage > 50) Color(0xFFD29922) else Color(0xFF3FB950)
+        )
+        
+        // Device RAM
+        ResourceItem(
+            icon = "💾",
+            label = "RAM",
+            value = "${deviceRamUsed}/${deviceRamTotal}MB",
+            color = if (deviceRamUsed > deviceRamTotal * 0.8) Color(0xFFF85149) else Color(0xFF58A6FF)
+        )
+        
+        // App RAM
+        ResourceItem(
+            icon = "📱",
+            label = "App",
+            value = "${appRamUsed}MB",
+            color = if (appRamUsed > 500) Color(0xFFD29922) else Color(0xFF3FB950)
+        )
+    }
+}
+
+@Composable
+private fun ResourceItem(icon: String, label: String, value: String, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(icon, fontSize = 12.sp)
+        Text(value, fontSize = 10.sp, color = color, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+        Text(label, fontSize = 8.sp, color = Color(0xFF8B949E))
+    }
+}
+

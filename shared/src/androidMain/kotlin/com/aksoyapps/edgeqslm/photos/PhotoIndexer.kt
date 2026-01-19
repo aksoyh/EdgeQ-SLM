@@ -49,6 +49,14 @@ class PhotoIndexer(private val context: Context) {
     }
     
     /**
+     * Clear all indexed photos from database
+     */
+    fun clearDatabase() {
+        android.util.Log.d("PhotoIndexer", "Clearing database for force re-indexing")
+        vectorStore.clearAll()
+    }
+    
+    /**
      * Get default test folder path - use Screenshots folder
      */
     fun getDefaultFolder(): String {

@@ -113,18 +113,38 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
                 // Calculate simple relevance score based on match count
                 val ocrText = it.getString(3) ?: ""
                 val fileName = it.getString(2)
-                val matchCount = searchTerms.count { term -> 
+                
+                // Find matching terms in OCR text
+                val matchedTerms = searchTerms.filter { term -> 
                     ocrText.contains(term, ignoreCase = true) || 
                     fileName.contains(term, ignoreCase = true)
                 }
-                val score = matchCount.toFloat() / searchTerms.size
+                val score = matchedTerms.size.toFloat() / searchTerms.size
+                
+                // Build match reason - show matching snippet from OCR
+                val matchReason = if (matchedTerms.isNotEmpty()) {
+                    val term = matchedTerms.first()
+                    val ocrLower = ocrText.lowercase()
+                    val termLower = term.lowercase()
+                    val idx = ocrLower.indexOf(termLower)
+                    if (idx >= 0) {
+                        val start = maxOf(0, idx - 15)
+                        val end = minOf(ocrText.length, idx + term.length + 15)
+                        val snippet = ocrText.substring(start, end).trim()
+                        "OCR: '...$snippet...'"
+                    } else {
+                        "Filename: '$fileName'"
+                    }
+                } else ""
                 
                 results.add(PhotoSearchResult(
                     id = it.getLong(0),
                     filePath = it.getString(1),
                     fileName = fileName,
                     ocrText = ocrText,
-                    score = score
+                    score = score,
+                    matchType = "OCR",
+                    matchReason = matchReason
                 ))
             }
         }
@@ -134,7 +154,7 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
     /**
      * Vector similarity search using image embeddings
      */
-    fun searchByImageEmbedding(queryEmbedding: FloatArray, limit: Int = 20): List<PhotoSearchResult> {
+    fun searchByImageEmbedding(queryEmbedding: FloatArray, queryText: String = "", limit: Int = 20): List<PhotoSearchResult> {
         val db = readableDatabase
         val cursor = db.rawQuery(
             "SELECT id, file_path, file_name, ocr_text, image_embedding FROM photos WHERE image_embedding IS NOT NULL",
@@ -154,7 +174,9 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
                         filePath = it.getString(1),
                         fileName = it.getString(2),
                         ocrText = it.getString(3),
-                        score = similarity
+                        score = similarity,
+                        matchType = "CLIP",
+                        matchReason = "CLIP: görsel benzerlik (query: '$queryText')"
                     ),
                     similarity
                 ))
@@ -182,7 +204,7 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
         } else emptyMap()
         
         val imageResults = if (queryEmbedding != null) {
-            searchByImageEmbedding(queryEmbedding, limit * 2).associateBy { it.filePath }
+            searchByImageEmbedding(queryEmbedding, textQuery, limit * 2).associateBy { it.filePath }
         } else emptyMap()
         
         // If no image embeddings, just return text results
@@ -190,14 +212,35 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
             return textResults.values.toList().sortedByDescending { it.score }.take(limit)
         }
         
+        // If only image results
+        if (textResults.isEmpty() && imageResults.isNotEmpty()) {
+            return imageResults.values.toList().sortedByDescending { it.score }.take(limit)
+        }
+        
         // Combine scores
         val allPaths = textResults.keys + imageResults.keys
         val combined = allPaths.map { path ->
-            val textScore = textResults[path]?.score ?: 0f
-            val imageScore = imageResults[path]?.score ?: 0f
+            val textResult = textResults[path]
+            val imageResult = imageResults[path]
+            val textScore = textResult?.score ?: 0f
+            val imageScore = imageResult?.score ?: 0f
             val combinedScore = textWeight * textScore + imageWeight * imageScore
             
-            (textResults[path] ?: imageResults[path])!!.copy(score = combinedScore)
+            // Determine match type and reason
+            val (matchType, matchReason) = when {
+                textResult != null && imageResult != null -> 
+                    "HYBRID" to "${textResult.matchReason} + ${imageResult.matchReason}"
+                textResult != null -> 
+                    "OCR" to textResult.matchReason
+                else -> 
+                    "CLIP" to (imageResult?.matchReason ?: "")
+            }
+            
+            (textResult ?: imageResult)!!.copy(
+                score = combinedScore,
+                matchType = matchType,
+                matchReason = matchReason
+            )
         }
         
         return combined.sortedByDescending { it.score }.take(limit)
@@ -314,5 +357,7 @@ data class PhotoSearchResult(
     val filePath: String,
     val fileName: String,
     val ocrText: String?,
-    val score: Float
+    val score: Float,
+    val matchType: String = "OCR",  // OCR, CLIP, or HYBRID
+    val matchReason: String = ""    // What matched
 )

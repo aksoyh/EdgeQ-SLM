@@ -56,5 +56,16 @@ data class PhotoSearchResultUi(
     val fileName: String,
     val ocrText: String?,
     val score: Float,
-    val thumbnailUri: String? = null
+    val thumbnailUri: String? = null,
+    val matchType: MatchType = MatchType.OCR,  // OCR or CLIP
+    val matchReason: String = ""  // e.g., "OCR: 'uçak bileti'" or "CLIP: visual similarity"
 )
+
+/**
+ * Type of match
+ */
+enum class MatchType {
+    OCR,    // Text match from OCR
+    CLIP,   // Visual similarity from CLIP
+    HYBRID  // Both OCR and CLIP
+}

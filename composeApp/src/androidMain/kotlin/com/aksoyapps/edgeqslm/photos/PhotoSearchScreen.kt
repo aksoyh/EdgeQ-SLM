@@ -437,29 +437,57 @@ private fun SearchTab(
             LazyVerticalGrid(columns = GridCells.Fixed(2), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(uiState.searchResults) { result ->
                     Card(
-                        modifier = Modifier.fillMaxWidth().height(180.dp).clickable { onPhotoClick(result) },
+                        modifier = Modifier.fillMaxWidth().height(200.dp).clickable { onPhotoClick(result) },
                         shape = RoundedCornerShape(12.dp),
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF21262D))
                     ) {
                         Column {
-                            Box(modifier = Modifier.fillMaxWidth().height(110.dp)) {
+                            Box(modifier = Modifier.fillMaxWidth().height(100.dp)) {
                                 AsyncImage(
                                     model = File(result.filePath),
                                     contentDescription = result.fileName,
                                     modifier = Modifier.fillMaxSize(),
                                     contentScale = ContentScale.Crop
                                 )
+                                // Match type badge (top-left)
+                                val badgeColor = when (result.matchType) {
+                                    MatchType.CLIP -> Color(0xFF8957E5) // Purple for CLIP
+                                    MatchType.HYBRID -> Color(0xFFD29922) // Orange for hybrid
+                                    else -> Color(0xFF58A6FF) // Blue for OCR
+                                }
                                 Box(
-                                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).background(Color(0xFF238636).copy(alpha = 0.95f), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 3.dp)
+                                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                                        .background(badgeColor.copy(alpha = 0.95f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                                ) {
+                                    Text(result.matchType.name, fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                }
+                                // Score badge (top-right)
+                                Box(
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                                        .background(Color(0xFF238636).copy(alpha = 0.95f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 6.dp, vertical = 3.dp)
                                 ) {
                                     Text("${(result.score * 100).toInt()}%", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
                                 }
                             }
-                            Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(8.dp)) {
+                            // Match reason
+                            if (result.matchReason.isNotBlank()) {
                                 Text(
-                                    text = result.ocrText?.take(60) ?: "No text",
-                                    fontSize = 11.sp,
-                                    color = if (result.ocrText != null) Color.White else Color(0xFF6E7681),
+                                    text = result.matchReason.take(50),
+                                    fontSize = 10.sp,
+                                    color = Color(0xFFADBBC4),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                            // OCR text preview
+                            Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 8.dp)) {
+                                Text(
+                                    text = result.ocrText?.take(40) ?: "No OCR text",
+                                    fontSize = 10.sp,
+                                    color = if (result.ocrText != null) Color(0xFF8B949E) else Color(0xFF6E7681),
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )

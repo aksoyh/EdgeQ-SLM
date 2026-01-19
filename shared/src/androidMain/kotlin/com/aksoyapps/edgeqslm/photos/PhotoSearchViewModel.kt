@@ -12,7 +12,7 @@ import java.io.File
 
 /**
  * ViewModel for Photo Search functionality
- * Simple demo mode - no ML models needed
+ * Supports both OCR text search and CLIP visual search
  */
 class PhotoSearchViewModel(private val context: Context) {
     
@@ -23,8 +23,18 @@ class PhotoSearchViewModel(private val context: Context) {
     private var photoIndexer: PhotoIndexer? = null
     private var indexingJob: Job? = null
     
-    // Demo mode - skip ML models
-    private var demoMode = true
+    // CLIP model paths
+    private val modelsDir: File
+        get() = File(context.getExternalFilesDir(null), "models")
+    
+    private val clipImageModelPath: String
+        get() = File(modelsDir, "clip-image.onnx").absolutePath
+    
+    private val clipTextModelPath: String
+        get() = File(modelsDir, "clip-text.onnx").absolutePath
+    
+    private val clipVocabPath: String
+        get() = File(modelsDir, "clip_tokenizer").absolutePath
     
     init {
         initialize()
@@ -36,15 +46,38 @@ class PhotoSearchViewModel(private val context: Context) {
             
             // Get default folder
             val defaultFolder = photoIndexer?.getDefaultFolder() ?: ""
-            
-            // Ensure folder exists
             File(defaultFolder).mkdirs()
+            
+            // Log model paths for debugging
+            android.util.Log.d("PhotoSearchVM", "Models dir: ${modelsDir.absolutePath}")
+            android.util.Log.d("PhotoSearchVM", "CLIP image path: $clipImageModelPath, exists: ${File(clipImageModelPath).exists()}")
+            android.util.Log.d("PhotoSearchVM", "CLIP text path: $clipTextModelPath, exists: ${File(clipTextModelPath).exists()}")
+            
+            // Check if CLIP models exist
+            val clipModelsExist = File(clipImageModelPath).exists() && File(clipTextModelPath).exists()
+            
+            val (modelLoaded, modeMessage) = if (clipModelsExist) {
+                // Try to initialize CLIP models
+                android.util.Log.d("PhotoSearchVM", "Initializing CLIP models...")
+                val success = photoIndexer?.initialize(clipImageModelPath, clipTextModelPath, clipVocabPath) ?: false
+                android.util.Log.d("PhotoSearchVM", "CLIP init result: $success")
+                if (success) {
+                    Pair(true, "CLIP + OCR mode")
+                } else {
+                    Pair(true, "OCR only (CLIP failed)")
+                }
+            } else {
+                android.util.Log.d("PhotoSearchVM", "CLIP models not found")
+                Pair(true, "OCR only (no CLIP models)")
+            }
             
             _uiState.value = _uiState.value.copy(
                 scanFolderPath = defaultFolder,
-                isModelLoaded = demoMode, // Demo mode enabled
-                modelLoadingMessage = if (demoMode) "Demo Mode (OCR only)" else "Models not loaded"
+                isModelLoaded = modelLoaded,
+                modelLoadingMessage = modeMessage
             )
+            
+            android.util.Log.d("PhotoSearchVM", "Mode: $modeMessage, CLIP exists: $clipModelsExist")
             
             // Refresh photo list
             refreshPhotoList()
@@ -87,7 +120,7 @@ class PhotoSearchViewModel(private val context: Context) {
     }
     
     /**
-     * Perform search
+     * Perform search - uses CLIP embedding if available, otherwise OCR text search
      */
     fun search() {
         val query = _uiState.value.searchQuery
@@ -108,11 +141,18 @@ class PhotoSearchViewModel(private val context: Context) {
                             fileName = result.fileName,
                             ocrText = result.ocrText,
                             score = result.score,
-                            thumbnailUri = "file://${result.filePath}"
+                            thumbnailUri = "file://${result.filePath}",
+                            matchType = when (result.matchType) {
+                                "CLIP" -> MatchType.CLIP
+                                "HYBRID" -> MatchType.HYBRID
+                                else -> MatchType.OCR
+                            },
+                            matchReason = result.matchReason
                         )
                     }
                 )
             } catch (e: Exception) {
+                android.util.Log.e("PhotoSearchVM", "Search error: ${e.message}", e)
                 _uiState.value = _uiState.value.copy(
                     isSearching = false,
                     error = "Search error: ${e.message}"
@@ -148,6 +188,7 @@ class PhotoSearchViewModel(private val context: Context) {
                     }
                 }
             } catch (e: Exception) {
+                android.util.Log.e("PhotoSearchVM", "Indexing error: ${e.message}", e)
                 _uiState.value = _uiState.value.copy(
                     isIndexing = false,
                     error = "Indexing error: ${e.message}"

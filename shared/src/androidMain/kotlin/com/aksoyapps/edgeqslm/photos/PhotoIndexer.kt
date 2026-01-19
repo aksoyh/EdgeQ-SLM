@@ -115,12 +115,14 @@ class PhotoIndexer(private val context: Context) {
      * Index all photos in the folder
      */
     fun indexFolder(): Flow<IndexingProgress> = flow {
+        android.util.Log.d("PhotoIndexer", "indexFolder STARTED")
         val photos = getPhotosInFolder()
         val total = photos.size
         var indexed = 0
         var skipped = 0
         var failed = 0
         
+        android.util.Log.d("PhotoIndexer", "indexFolder: $total photos to process")
         emit(IndexingProgress(0, total, "Starting indexing..."))
         
         if (total == 0) {
@@ -131,7 +133,10 @@ class PhotoIndexer(private val context: Context) {
         for (photo in photos) {
             try {
                 // Check if already indexed and up-to-date
-                if (!vectorStore.needsIndexing(photo.path, photo.lastModified)) {
+                val needs = vectorStore.needsIndexing(photo.path, photo.lastModified)
+                android.util.Log.d("PhotoIndexer", "Check ${photo.name}: needsIndexing=$needs")
+                
+                if (!needs) {
                     skipped++
                     continue
                 }
@@ -164,13 +169,17 @@ class PhotoIndexer(private val context: Context) {
      * Index a single photo
      */
     private suspend fun indexPhoto(photo: PhotoFile) {
+        android.util.Log.d("PhotoIndexer", "Indexing: ${photo.name}, imageEncoder: ${imageEncoder != null}")
+        
         val bitmap = BitmapFactory.decodeFile(photo.path) ?: return
         
         // Generate image embedding
         val imageEmbedding = imageEncoder?.encode(bitmap)
+        android.util.Log.d("PhotoIndexer", "Image embedding: ${imageEmbedding?.size ?: "null"}")
         
         // Run OCR
         val ocrText = runOcr(photo.path)
+        android.util.Log.d("PhotoIndexer", "OCR text: ${ocrText?.take(30) ?: "null"}")
         
         // Generate text embedding for OCR text
         val textEmbedding = if (!ocrText.isNullOrBlank()) {

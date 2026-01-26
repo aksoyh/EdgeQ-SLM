@@ -1,210 +1,158 @@
-# Project Guide - EdgeQ-SLM Technical Overview
+# EdgeQ-SLM Project Guide
 
-## 1. Project Architecture
+## Overview
 
-EdgeQ-SLM is a Kotlin Multiplatform (KMP) project using Compose Multiplatform for UI. It demonstrates on-device inference of Small Language Models (SLMs) using llama.cpp.
+EdgeQ-SLM is a Kotlin Multiplatform project demonstrating on-device AI capabilities:
+- **LLM Chat**: Text generation with Qwen 1.5 1.8B (INT8 quantized)
+- **Photo Search**: OCR + CLIP visual search
+- **Performance Monitoring**: Real-time CPU/RAM metrics
 
-### Module Structure
+## Quick Start
+
+### 1. Build the Project
+```bash
+cd EdgeQ-SLM
+./gradlew :composeApp:assembleDebug
+```
+
+### 2. Install on Device
+```bash
+adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
+```
+
+### 3. Deploy Models
+```bash
+# LLM Model (required for LLM tab)
+adb push qwen-q8_0.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
+
+# CLIP Models (required for visual search)
+adb push clip-vit-b32-image.onnx /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
+adb push clip-vit-b32-text.onnx /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
+adb push -r clip_tokenizer/ /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
+```
+
+### 4. Grant Permissions
+- Open Android Settings → Apps → EdgeQ-SLM → Permissions
+- Enable "All Files Access"
+
+## Project Structure
+
 ```
 EdgeQ-SLM/
-├── shared/                      # Business logic (KMP)
-│   ├── commonMain/              # Cross-platform code
-│   │   ├── LlmEngine.kt         # Inference engine interface
-│   │   ├── LlmViewModel.kt      # State management
-│   │   └── ModelRepository.kt   # Model management (expect)
-│   ├── androidMain/             # Android implementations
-│   │   ├── AndroidLlamaCppEngine.kt
-│   │   ├── ModelRepository.android.kt
-│   │   └── cpp/                 # Native code
-│   │       ├── llama_jni.cpp    # JNI bridge to llama.cpp
-│   │       └── CMakeLists.txt   # NDK build config
-│   └── iosMain/                 # iOS implementations (placeholder)
-├── composeApp/                  # UI module
-│   ├── commonMain/              # Shared UI (App.kt)
-│   ├── androidMain/             # Android entry (MainActivity)
-│   └── iosMain/                 # iOS entry (MainViewController)
-└── docs/                        # Documentation
+├── composeApp/                    # UI Layer
+│   └── src/
+│       ├── commonMain/kotlin/     # Shared Compose UI (App.kt)
+│       └── androidMain/kotlin/    # Android UI (MainActivity, PhotoSearchScreen)
+├── shared/                        # Business Logic
+│   └── src/
+│       ├── commonMain/kotlin/     # Shared interfaces (LlmEngine, ViewModel)
+│       ├── androidMain/kotlin/    # Android implementations
+│       │   ├── AndroidLlamaCppEngine.kt  # LLM JNI wrapper
+│       │   └── photos/            # Photo search module
+│       └── androidMain/cpp/       # Native code (llama_jni.cpp)
+├── docs/                          # Documentation
+└── models/                        # Model files (gitignored)
 ```
 
----
+## Features
 
-## 2. Key Components
+### LLM Chat (🤖 Tab)
+- Load and run Qwen 1.5 1.8B model
+- ChatML format for conversation
+- Real-time metrics: TTFT, tokens/sec, memory
+- In-app model download from HuggingFace
 
-### LlmEngine Interface
-```kotlin
-interface LlmEngine {
-    suspend fun loadModel(path: String): Boolean
-    suspend fun generate(
-        prompt: String,
-        maxTokens: Int = 256,
-        temperature: Float = 0.7f,
-        topP: Float = 0.9f,
-        repeatPenalty: Float = 1.1f,
-        useChatTemplate: Boolean = true
-    ): String
-    fun unloadModel()
-    fun isModelLoaded(): Boolean
-    // Metrics
-    fun getPrefillTimeMs(): Long
-    fun getDecodeTimeMs(): Long
-    fun getTokensGenerated(): Int
-    fun getMemoryUsageMb(): Float
-}
-```
+### Photo Search (📷 Tab)
+| Feature | Description |
+|---------|-------------|
+| OCR Indexing | Extract text from photos using ML Kit |
+| CLIP Search | Find photos by visual content |
+| Hybrid Search | Combined OCR + CLIP results |
+| Match Badges | OCR (blue), CLIP (purple), HYBRID (orange) |
+| Force Index | 5-second long-press to re-index |
+| Fullscreen View | Pinch-to-zoom photo preview |
 
-### ModelRepository (expect/actual)
-```kotlin
-// Common
-expect class ModelRepository() {
-    fun getModelPath(): String
-    suspend fun isModelDownloaded(): Boolean
-    fun downloadModel(): Flow<DownloadStatus>
-    suspend fun getAvailableModels(): List<ModelInfo>
-    fun setSelectedModel(path: String)
-}
+### Resource Monitor (Bottom Bar)
+| Metric | Description |
+|--------|-------------|
+| CPU | System load (may show 0% on Android 8+) |
+| App CPU | Application CPU usage |
+| RAM | Device memory (used/total) |
+| App RAM | Application memory usage |
 
-// Android: Uses HttpURLConnection for downloads
-// iOS: Uses Ktor client (placeholder)
-```
+## Key Files
 
-### LlmViewModel
-Manages UI state including:
-- Model loading status
-- Download progress (%, MB, Mbps)
-- Generation output
-- Performance metrics (TTFT, tokens/sec, memory)
+| File | Purpose |
+|------|---------|
+| `MainActivity.kt` | Navigation, resource bar, permissions |
+| `PhotoSearchScreen.kt` | Photo search UI, match badges |
+| `PhotoIndexer.kt` | OCR + CLIP indexing logic |
+| `PhotoVectorStore.kt` | SQLite storage, similarity search |
+| `ClipImageEncoder.kt` | ONNX image embedding |
+| `ClipTextEncoder.kt` | ONNX text embedding with tokenizer |
+| `AndroidLlamaCppEngine.kt` | JNI bridge to llama.cpp |
+| `llama_jni.cpp` | Native C++ inference code |
 
----
+## Development
 
-## 3. Native Integration
+### Adding a New Feature
+1. Create/modify files in `shared/src/androidMain/kotlin/`
+2. Update UI in `composeApp/src/androidMain/kotlin/`
+3. Build and test: `./gradlew :composeApp:assembleDebug`
 
-### JNI Bridge (llama_jni.cpp)
-Located at: `shared/src/androidMain/cpp/llama_jni.cpp`
-
-Functions:
-- `Java_com_aksoyapps_edgeqslm_shared_AndroidLlamaCppEngine_loadModelNative`
-- `Java_com_aksoyapps_edgeqslm_shared_AndroidLlamaCppEngine_generateNative`
-- `Java_com_aksoyapps_edgeqslm_shared_AndroidLlamaCppEngine_unloadNative`
-- Metric getters for prefill time, decode time, tokens, memory
-
-### CMake Configuration
-```cmake
-# Key settings
-CMAKE_SYSTEM_NAME = Android
-CMAKE_ANDROID_ARCH_ABI = arm64-v8a
-CMAKE_ANDROID_NDK = [NDK path]
-GGML_OPENMP = OFF
-LLAMA_BUILD_COMMON = ON
-```
-
----
-
-## 4. Model Download System
-
-### Flow
-1. App starts → `ModelRepository.isModelDownloaded()` check
-2. If not found → Show download button
-3. User taps download → `ModelRepository.downloadModel()` returns Flow
-4. Flow emits `DownloadStatus.Progress(progress, bytes, total, speed)`
-5. UI updates progress bar, notification updates
-6. On complete → `DownloadStatus.Completed` emitted
-7. Model ready for loading
-
-### Download Implementation (Android)
-Uses native `HttpURLConnection` instead of Ktor due to memory issues with large files:
-- Buffer size: 8192 bytes
-- Progress updates: Every 500ms
-- Notification: Updates via NotificationCompat
-- Target: App's external files directory (no permissions needed)
-
----
-
-## 5. UI Components
-
-### App.kt Structure
-```
-EdgeQSLMApp
-├── HeaderSection           # App title
-├── ModelStatusCard         # Status, model selector, debug checkbox
-├── PresetPromptsRow        # Quick prompt chips
-├── PromptInputSection      # Text input
-├── ActionButtonsRow        # Download/Load/Generate buttons
-│   └── Download Progress   # Progress bar with stats
-├── MetricsDashboard        # TTFT, tokens/sec, memory
-├── OutputSection           # Generated text
-└── ErrorCard               # Error display
-```
-
----
-
-## 6. File Locations
-
-### Android Storage
-```
-/sdcard/Android/data/com.aksoyapps.edgeqslm/files/
-├── qwen1_5-1_8b-chat-q8_0.gguf     # Downloaded model
-└── qwen1_5-1_8b-chat-q8_0.gguf.tmp # Temp during download
-```
-
-### APK Output
-```
-composeApp/build/outputs/apk/debug/composeApp-debug.apk
-```
-
----
-
-## 7. Build Commands
-
+### Debugging
 ```bash
-# Full build
-./gradlew :composeApp:assembleDebug
+# View app logs
+adb logcat | grep -E "PhotoIndexer|ClipTextEncoder|PhotoSearchVM|LlamaJNI"
 
-# Install
-adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
+# Clear app data
+adb shell pm clear com.aksoyapps.edgeqslm
 
-# Run
-adb shell am start -n com.aksoyapps.edgeqslm/.MainActivity
-
-# Logs
-adb logcat -s ModelRepository:D LlamaJNI:V
+# Force stop app
+adb shell am force-stop com.aksoyapps.edgeqslm
 ```
 
----
+### Git Workflow
+```bash
+# Current development branch
+git checkout feature/clip-visual-search
 
-## 8. Configuration
+# Commit changes
+git add .
+git commit -m "Description"
+git push origin feature/clip-visual-search
 
-### Gradle Properties
-```properties
-org.gradle.java.home=[Java 17 path]
-org.gradle.jvmargs=-Xmx4g
+# Merge to main when ready
+git checkout main
+git merge feature/clip-visual-search
+git push origin main
 ```
 
-### Build Configuration
-| Setting | Value |
-|---------|-------|
-| Package Name | com.aksoyapps.edgeqslm |
-| Min SDK | 24 |
-| Target SDK | 34 |
-| NDK | 26.1.10909125 |
-| ABI | arm64-v8a |
+## Known Limitations
+
+| Limitation | Reason | Workaround |
+|------------|--------|------------|
+| CLIP English only | Model trained on English | Use English search terms |
+| System CPU 0% | Android SELinux blocks /proc | App CPU works correctly |
+| BPE tokenizer basic | Simple word-level impl | English whole words work best |
+
+## Dependencies
+
+| Library | Version | Purpose |
+|---------|---------|---------|
+| llama.cpp | Latest | LLM inference engine |
+| ONNX Runtime | 1.18.0 | CLIP model inference |
+| ML Kit | Latest | OCR text recognition |
+| Coil | 3.0+ | Image loading |
+| Compose Multiplatform | 1.6+ | UI framework |
+
+## Resources
+
+- [llama.cpp](https://github.com/ggerganov/llama.cpp)
+- [CLIP](https://github.com/openai/CLIP)
+- [Qwen 1.5](https://huggingface.co/Qwen)
+- [ONNX Runtime](https://onnxruntime.ai/)
 
 ---
 
-## 9. Dependencies
-
-### Kotlin/Compose
-- Kotlin: 2.1.0
-- Compose Multiplatform: 1.7.3
-- Coroutines: 1.9.0
-
-### Android
-- AGP: 8.2.2
-- AndroidX Core: 1.13.1
-- Material3: 1.3.1
-
-### Networking
-- Ktor: 2.3.8 (iOS only now)
-
----
-
-*Last Updated: 2026-01-18*
+*Last updated: 2026-01-21*

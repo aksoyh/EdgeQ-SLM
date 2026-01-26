@@ -26,6 +26,10 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.aksoyapps.edgeqslm.photos.PhotoSearchScreen
 import com.aksoyapps.edgeqslm.photos.PhotoSearchViewModel
+import com.aksoyapps.edgeqslm.benchmark.BenchmarkScreen
+import com.aksoyapps.edgeqslm.benchmark.BenchmarkViewModel
+import com.aksoyapps.edgeqslm.benchmark.AndroidExportService
+import com.aksoyapps.edgeqslm.benchmark.createSystemMetricsProvider
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -37,6 +41,7 @@ class MainActivity : ComponentActivity() {
     
     private lateinit var llmViewModel: LlmViewModel
     private lateinit var photoSearchViewModel: PhotoSearchViewModel
+    private lateinit var benchmarkViewModel: BenchmarkViewModel
     
     // Folder picker launcher
     private val folderPickerLauncher = registerForActivityResult(
@@ -57,6 +62,19 @@ class MainActivity : ComponentActivity() {
         val modelPath = findModelPath()
         llmViewModel = LlmViewModel(engine, modelPath, repository)
         
+        // Initialize Benchmark components
+        val metricsProvider = createSystemMetricsProvider(this)
+        val exportService = AndroidExportService(this)
+        benchmarkViewModel = BenchmarkViewModel(
+            engine = engine,
+            metricsProvider = metricsProvider,
+            exportService = exportService,
+            appVersion = try { 
+                packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0" 
+            } catch (e: Exception) { "1.0.0" },
+            modelPath = modelPath
+        )
+        
         // Initialize Photo Search
         photoSearchViewModel = PhotoSearchViewModel(this)
 
@@ -64,6 +82,7 @@ class MainActivity : ComponentActivity() {
             MainAppWithTabs(
                 llmViewModel = llmViewModel,
                 photoSearchViewModel = photoSearchViewModel,
+                benchmarkViewModel = benchmarkViewModel,
                 onSelectFolder = { openFolderPicker() }
             )
         }
@@ -179,6 +198,7 @@ class MainActivity : ComponentActivity() {
 fun MainAppWithTabs(
     llmViewModel: LlmViewModel,
     photoSearchViewModel: PhotoSearchViewModel,
+    benchmarkViewModel: BenchmarkViewModel,
     onSelectFolder: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
@@ -209,10 +229,20 @@ fun MainAppWithTabs(
                             )
                         )
                         NavigationBarItem(
-                            icon = { Text("📷", style = MaterialTheme.typography.titleLarge) },
-                            label = { Text("Photos") },
+                            icon = { Text("📊", style = MaterialTheme.typography.titleLarge) },
+                            label = { Text("Benchmark") },
                             selected = selectedTab == 1,
                             onClick = { selectedTab = 1 },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = Color(0xFF58A6FF),
+                                indicatorColor = Color(0xFF21262D)
+                            )
+                        )
+                        NavigationBarItem(
+                            icon = { Text("📷", style = MaterialTheme.typography.titleLarge) },
+                            label = { Text("Photos") },
+                            selected = selectedTab == 2,
+                            onClick = { selectedTab = 2 },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = Color(0xFF58A6FF),
                                 indicatorColor = Color(0xFF21262D)
@@ -230,7 +260,11 @@ fun MainAppWithTabs(
             ) {
                 when (selectedTab) {
                     0 -> App(llmViewModel)
-                    1 -> {
+                    1 -> BenchmarkScreen(
+                        viewModel = benchmarkViewModel,
+                        onNavigateBack = { selectedTab = 0 }
+                    )
+                    2 -> {
                         val photoUiState by photoSearchViewModel.uiState.collectAsState()
                         PhotoSearchScreen(
                             uiState = photoUiState,
@@ -250,6 +284,7 @@ fun MainAppWithTabs(
         }
     }
 }
+
 
 /**
  * Resource Status Bar showing CPU and RAM usage

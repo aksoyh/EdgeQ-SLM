@@ -3,7 +3,7 @@
 ## Thesis: Efficient Quantization and Low-Latency Inference of Small Language Models on Mobile Devices
 
 **Author:** Hasan Aksoy  
-**Last Updated:** 2026-01-18  
+**Last Updated:** 2026-01-21  
 **Project Repository:** EdgeQ-SLM
 
 ---
@@ -22,6 +22,11 @@
 | 2026-01-18 | Device Deploy | Model deployment and permission debugging |
 | 2026-01-18 | Model Download | Implemented HuggingFace download with progress UI |
 | 2026-01-18 | Package Rename | Changed package from com.example to com.aksoyapps |
+| 2026-01-19 | Photo Search | Added OCR-based photo indexing and search |
+| 2026-01-19 | CLIP Integration | Added visual search with CLIP ViT-B/32 |
+| 2026-01-19 | Hybrid Search | Combined OCR + CLIP search with match badges |
+| 2026-01-19 | Resource Monitor | Added CPU/RAM monitoring bar |
+| 2026-01-21 | Documentation | Comprehensive docs update |
 
 ---
 
@@ -36,6 +41,7 @@
 | NDK | 26.1.10909125 |
 | CMake | 3.22.1 |
 | Java | 17 (JBR-17.0.14) |
+| ONNX Runtime | 1.18.0 |
 
 ### 2.2 Build Issues and Resolutions
 
@@ -54,23 +60,32 @@ Resolution: Added to gradle.properties:
 org.gradle.java.home=/Users/hasanaksoy/Library/Java/JavaVirtualMachines/jbr-17.0.14/Contents/Home
 ```
 
-**Issue 3: Python Dependencies Missing**
+**Issue 3: ONNX Runtime IR Version**
 ```
-ModuleNotFoundError: No module named 'transformers'
+This is an invalid ONNX model. The highest supported IR version is 9
 ```
-Resolution: `pip3 install transformers torch sentencepiece huggingface_hub`
+Resolution: Updated ONNX Runtime from 1.16.3 to 1.18.0 for IR version 10 support.
 
 ---
 
 ## 3. Model Preparation
 
-### 3.1 Quantization Results
+### 3.1 LLM Quantization Results
 
 | Metric | Value |
 |--------|-------|
 | Original Size (FP16) | 3.67 GB |
 | Quantized Size (Q8_0) | 1.86 GB |
 | Compression Ratio | 1.97x |
+
+### 3.2 CLIP Models
+
+| Model | Size | Format |
+|-------|------|--------|
+| clip-vit-b32-image.onnx | ~330 MB | ONNX |
+| clip-vit-b32-text.onnx | ~330 MB | ONNX |
+| vocab.json | ~2 MB | JSON |
+| merges.txt | ~500 KB | Text |
 
 ---
 
@@ -92,77 +107,87 @@ Resolution: `pip3 install transformers torch sentencepiece huggingface_hub`
 EdgeQ-SLM/
 ├── shared/
 │   ├── src/commonMain/kotlin/    # LlmEngine interface, ViewModel, ModelRepository
-│   ├── src/androidMain/kotlin/   # AndroidLlamaCppEngine (JNI wrapper), ModelRepository.android
-│   ├── src/iosMain/kotlin/       # IosLlamaCppEngine, ModelRepository.ios
+│   │   └── photos/               # PhotoSearchUiState
+│   ├── src/androidMain/kotlin/   # AndroidLlamaCppEngine (JNI wrapper)
+│   │   └── photos/               # PhotoIndexer, PhotoVectorStore, CLIP encoders
+│   ├── src/iosMain/kotlin/       # IosLlamaCppEngine
 │   └── src/androidMain/cpp/      # JNI bridge (llama_jni.cpp, CMakeLists.txt)
 ├── composeApp/
-│   ├── src/commonMain/kotlin/    # App.kt (UI with download progress)
-│   └── src/androidMain/kotlin/   # MainActivity
+│   ├── src/commonMain/kotlin/    # App.kt (LLM UI)
+│   └── src/androidMain/kotlin/   # MainActivity, PhotoSearchScreen
+└── docs/                         # Documentation
 ```
 
-### 5.2 CMake Cross-Compilation Issues
+### 5.2 Photo Search Module
 
-**Issue: -ffast-math Incompatibility**
-```
-error: "some routines in ggml.c require non-finite math arithmetics"
-```
-Resolution: Added to CMakeLists.txt:
-```cmake
-add_compile_options(-fno-finite-math-only)
-set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
-```
-
-### 5.3 JNI Signature
-
-```kotlin
-private external fun generateNative(
-    prompt: String,
-    maxTokens: Int,        // 256 default
-    temperature: Float,    // 0.7 default
-    topP: Float,           // 0.9 default
-    repeatPenalty: Float,  // 1.1 default
-    useChatTemplate: Boolean
-): String
-```
+| Component | File | Description |
+|-----------|------|-------------|
+| Indexer | `PhotoIndexer.kt` | OCR + CLIP embedding generation |
+| Vector Store | `PhotoVectorStore.kt` | SQLite storage, similarity search |
+| Image Encoder | `ClipImageEncoder.kt` | CLIP image → 512-dim vector |
+| Text Encoder | `ClipTextEncoder.kt` | CLIP text → 512-dim vector (BPE tokenizer) |
+| ViewModel | `PhotoSearchViewModel.kt` | State management, search logic |
+| UI | `PhotoSearchScreen.kt` | Photo grid, search UI, match badges |
 
 ---
 
-## 6. Device Deployment Challenges
+## 6. Photo Search Feature (2026-01-19)
 
-### 6.1 Model Loading Failures
+### 6.1 OCR Indexing
 
-**Attempt 1: /sdcard/Download/**
-```
-E LlamaJNI: loadModelNative: Failed to load
-```
-Cause: Scoped storage restrictions on Android 11+
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| OCR Engine | Google ML Kit | Extract text from photos |
+| Database | SQLite | Store OCR text, file metadata |
+| Search | SQL LIKE | Full-text search in OCR content |
 
-**Attempt 2: /data/local/tmp/**
-```
-E LlamaJNI: loadModelNative: Failed to load
-```
-Cause: File owned by shell user, app cannot access
+### 6.2 CLIP Visual Search
 
-**Attempt 3: App's External Files Directory** ✅
-```bash
-adb push model.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
-```
-Status: **WORKING** - No permission issues
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| Image Encoder | CLIP ViT-B/32 | Photo → 512-dim embedding |
+| Text Encoder | CLIP ViT-B/32 | Query → 512-dim embedding |
+| Similarity | Cosine | Compare embeddings |
+| Tokenizer | BPE | Byte-Pair Encoding for text |
 
-### 6.2 Permission Fixes Applied
+### 6.3 Match Type Badges
 
-- Added `READ_EXTERNAL_STORAGE` permission
-- Added `INTERNET` and `ACCESS_NETWORK_STATE` permissions
-- Added `POST_NOTIFICATIONS` permission (Android 13+)
-- Set `android:requestLegacyExternalStorage="true"`
-- Set `android:largeHeap="true"` for 2GB model
-- Changed default path to app's own directory
+| Badge | Color | Description |
+|-------|-------|-------------|
+| OCR | Blue (#58A6FF) | Matched via text content |
+| CLIP | Purple (#8957E5) | Matched via visual similarity |
+| HYBRID | Orange (#D29922) | Both OCR and CLIP matched |
+
+### 6.4 Force Index Feature
+
+- **Normal click**: Regular indexing (skip already indexed)
+- **5-second long press**: Force re-index all photos
+- Progress bar fills from left to right during hold
+- Button text changes to "⚡ Force Indexing..."
 
 ---
 
-## 7. Model Download Feature (2026-01-18)
+## 7. Resource Monitoring (2026-01-19)
 
-### 7.1 Feature Overview
+### 7.1 Status Bar Components
+
+| Metric | Source | Update Interval |
+|--------|--------|-----------------|
+| Device RAM | ActivityManager.MemoryInfo | 2 seconds |
+| App RAM | Debug.getNativeHeapAllocatedSize + Runtime | 2 seconds |
+| App CPU | Debug.threadCpuTimeNanos | 2 seconds |
+| System CPU | /proc/loadavg (limited on Android 8+) | 2 seconds |
+
+### 7.2 Known Limitations
+
+- **System CPU shows 0%**: Android SELinux restrictions block /proc/loadavg access
+- **App CPU**: Only measures main thread, not worker threads
+
+---
+
+## 8. Model Download Feature (2026-01-18)
+
+### 8.1 Feature Overview
 
 Implemented in-app model download from HuggingFace with:
 - Progress bar with percentage
@@ -170,69 +195,17 @@ Implemented in-app model download from HuggingFace with:
 - Downloaded/Total size (MB)
 - System notification with progress
 - Model selection dropdown
-- Debug checkbox for testing
 
-### 7.2 Implementation Details
+### 8.2 Model Sources
 
-| Component | File | Description |
-|-----------|------|-------------|
-| Common Interface | `ModelRepository.kt` | expect class with DownloadStatus, ModelInfo |
-| Android Impl | `ModelRepository.android.kt` | HttpURLConnection download |
-| iOS Impl | `ModelRepository.ios.kt` | Ktor client download (placeholder) |
-| ViewModel | `LlmViewModel.kt` | Download state management |
-| UI | `App.kt` | Progress bar, model selector, debug checkbox |
-
-### 7.3 Download Issues and Resolutions
-
-| Issue | Cause | Resolution |
-|-------|-------|------------|
-| Google Drive warning page | File >100MB triggers virus scan | Switched to HuggingFace direct URL |
-| Ktor "connection abort" | Ktor memory issues with large files | Replaced with native HttpURLConnection |
-| Read permission error | Scoped storage on Downloads folder | Prioritize app's external files directory |
-| Duplicate model files | No model selection | Added dropdown to select from available models |
-
-### 7.4 Model Sources
-
-| Source | URL | Status |
-|--------|-----|--------|
-| HuggingFace (Official) | `https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q8_0.gguf` | ✅ Working |
-| Google Drive (Custom) | `https://drive.google.com/uc?export=download&id=...` | ❌ Warning page blocks download |
+| Source | Status |
+|--------|--------|
+| HuggingFace (Qwen) | ✅ Working |
+| CLIP models (manual) | ✅ Manual push via ADB |
 
 ---
 
-## 8. Package Rename (2026-01-18)
-
-Changed package name from `com.example.edgeqslm` to `com.aksoyapps.edgeqslm`.
-
-### Files Updated
-
-| File | Change |
-|------|--------|
-| `composeApp/build.gradle.kts` | namespace and applicationId |
-| `shared/build.gradle.kts` | namespace |
-| `AndroidManifest.xml` | Package references |
-| All Kotlin files | Package declarations |
-| `llama_jni.cpp` | JNI function names |
-
----
-
-## 9. Challenges and Learnings
-
-| Challenge | Root Cause | Solution |
-|-----------|------------|----------|
-| Java 25 incompatible | AGP requires Java 17 | Set org.gradle.java.home |
-| Makefile deprecated | llama.cpp migrated to CMake | Use cmake instead of make |
-| -ffast-math error | GGML needs non-finite math | Add -fno-finite-math-only |
-| Truncated responses | n_predict=50 too low | Increased to 256, made configurable |
-| Poor formatting | Missing ChatML template | Added template wrapper |
-| Model load fails | Android scoped storage | Use app's files directory |
-| ADB unauthorized | USB debugging not approved | Accept prompt on device |
-| Google Drive block | Virus scan warning page | Use HuggingFace instead |
-| Ktor download fails | Memory issues with large files | Use native HttpURLConnection |
-
----
-
-## 10. Current Status
+## 9. Current Status
 
 ### Completed ✅
 - [x] llama.cpp desktop build
@@ -249,62 +222,74 @@ Changed package name from `com.example.edgeqslm` to `com.aksoyapps.edgeqslm`.
 - [x] Download progress UI with speed/size info
 - [x] Model selection dropdown
 - [x] Package rename to com.aksoyapps.edgeqslm
+- [x] **Photo Search with OCR indexing**
+- [x] **CLIP visual search integration**
+- [x] **Hybrid search (OCR + CLIP)**
+- [x] **Match type badges (OCR/CLIP/HYBRID)**
+- [x] **Force Index with long-press**
+- [x] **Resource monitoring bar (CPU/RAM)**
+- [x] **Scrollable Photo Search page**
+- [x] **Fullscreen photo viewer**
 
 ### In Progress 🔄
-- [ ] Android performance measurements
+- [ ] CLIP BPE tokenizer optimization
+- [ ] Android LLM performance measurements
 
 ### Pending 📋
 - [ ] INT4 quantization comparison
 - [ ] GPU/NPU acceleration tests
 - [ ] Multiple device benchmarks
 - [ ] iOS implementation testing
+- [ ] RAG integration (LLM + Photo context)
 
 ---
 
-## 11. Metrics Summary Table
+## 10. Metrics Summary Table
 
 | Metric | Desktop (M-series) | Android (Expected) |
 |--------|-------------------|-------------------|
-| Model Size | 1.86 GB | 1.86 GB |
+| LLM Model Size | 1.86 GB | 1.86 GB |
+| CLIP Models Size | ~660 MB | ~660 MB |
 | Prefill Speed | ~300 t/s | TBD |
 | Decode Speed | ~50 t/s | TBD |
 | TTFT | ~50 ms | TBD |
-| Memory Usage | ~2.5 GB | TBD |
+| Memory Usage | ~2.5 GB | ~2 GB (observed) |
+
+---
+
+## 11. Git Branch Structure
+
+| Branch | Description |
+|--------|-------------|
+| `main` | Stable base (needs merge) |
+| `feature/model-download` | Model download feature |
+| `feature/photo-search-ocr` | OCR photo search |
+| `feature/clip-visual-search` | **Current** - CLIP + OCR + UI improvements |
 
 ---
 
 ## 12. Next Steps
 
-1. **Collect Metrics**: Measure TTFT, tokens/sec, memory on device
-2. **INT4 Testing**: Quantize to Q4_0, compare speed vs accuracy
-3. **GPU Offloading**: Test with GGML_OPENCL for Adreno GPUs
-4. **Multi-Device Benchmark**: Test on various Android devices
-5. **iOS Testing**: Verify iOS build and functionality
-6. **Documentation**: Complete thesis measurements appendix
+1. **Merge to Main**: Merge feature/clip-visual-search to main
+2. **CLIP Tokenizer**: Implement proper BPE tokenizer for better accuracy
+3. **Collect Metrics**: Measure TTFT, tokens/sec, memory on device
+4. **INT4 Testing**: Quantize to Q4_0, compare speed vs accuracy
+5. **RAG Integration**: Connect photo search results to LLM context
+6. **Multi-Device Benchmark**: Test on various Android devices
 
 ---
 
-## Appendix A: Key Files Modified
+## Appendix A: Key Files
 
 | File | Purpose |
 |------|---------|
-| `shared/src/androidMain/cpp/CMakeLists.txt` | llama.cpp cross-compile config |
-| `shared/src/androidMain/cpp/llama_jni.cpp` | JNI bridge with ChatML support |
-| `shared/src/androidMain/kotlin/.../AndroidLlamaCppEngine.kt` | Kotlin JNI wrapper |
-| `shared/src/androidMain/kotlin/.../ModelRepository.android.kt` | Android download implementation |
-| `shared/src/commonMain/kotlin/.../LlmEngine.kt` | Interface with metrics |
-| `shared/src/commonMain/kotlin/.../LlmViewModel.kt` | State management with download |
-| `shared/src/commonMain/kotlin/.../ModelRepository.kt` | Cross-platform download interface |
-| `composeApp/src/commonMain/kotlin/.../App.kt` | UI with metrics and download progress |
-| `gradle.properties` | Java 17 path configuration |
-
-## Appendix B: Git Branch Structure
-
-| Branch | Description |
-|--------|-------------|
-| `main` | Stable base project |
-| `feature/model-download` | Model download feature with progress UI |
+| `shared/src/androidMain/kotlin/.../photos/PhotoIndexer.kt` | OCR + CLIP indexing |
+| `shared/src/androidMain/kotlin/.../photos/PhotoVectorStore.kt` | SQLite storage, search |
+| `shared/src/androidMain/kotlin/.../photos/ClipImageEncoder.kt` | ONNX image inference |
+| `shared/src/androidMain/kotlin/.../photos/ClipTextEncoder.kt` | ONNX text inference |
+| `composeApp/src/androidMain/kotlin/.../photos/PhotoSearchScreen.kt` | Photo search UI |
+| `composeApp/src/androidMain/kotlin/.../MainActivity.kt` | Navigation, resource bar |
 
 ---
 
-*Report generated: 2026-01-18*
+*Report updated: 2026-01-21*

@@ -1,195 +1,189 @@
-# PROJECT_GUIDE_FOR_HASAN.md
+# EdgeQ-SLM Proje Rehberi (Hasan için)
 
-## Project Structure (Proje Yapısı)
-Bu proje Kotlin Multiplatform (KMP) kullanılarak hazırlanmıştır. Kodun büyük bir kısmı Android ve iOS arasında ortaktır.
+## 🎯 Proje Özeti
 
-### Module Yapısı
-```
-EdgeQ-SLM/
-├── shared/                          # Paylaşılan iş mantığı
-│   ├── commonMain/                  # Cross-platform kod
-│   │   ├── LlmEngine.kt             # Inference engine interface
-│   │   ├── LlmViewModel.kt          # State management + download
-│   │   └── ModelRepository.kt       # Model yönetimi (expect)
-│   ├── androidMain/                 # Android implementasyonları
-│   │   ├── AndroidLlamaCppEngine.kt # JNI wrapper
-│   │   ├── ModelRepository.android.kt # HuggingFace download
-│   │   └── cpp/                     # Native C++ kodu
-│   │       ├── llama_jni.cpp        # JNI bridge
-│   │       └── CMakeLists.txt       # Cross-compile config
-│   └── iosMain/                     # iOS implementasyonları
-│       └── ModelRepository.ios.kt   # iOS download (placeholder)
-├── composeApp/                      # UI modülü
-│   ├── commonMain/                  # Shared UI
-│   │   └── App.kt                   # Ana UI + download progress
-│   ├── androidMain/                 # Android UI
-│   │   └── MainActivity.kt          # Entry point
-│   └── iosMain/                     # iOS UI
-│       └── MainViewController.kt    # iOS entry point
-```
+Bu proje, mobil cihazlarda çalışan bir AI asistanı oluşturmayı hedefliyor:
+- **LLM Chat**: Qwen 1.5 1.8B modeli ile metin üretimi
+- **Photo Search**: OCR + CLIP ile fotoğraflarda arama
+- **On-Device**: Tüm AI işlemleri cihaz üzerinde çalışıyor
 
 ---
 
-## ✅ Tamamlanan Özellikler
+## 📱 Uygulama Yapısı
 
-### 1. llama.cpp Entegrasyonu
-- **JNI Bridge**: `llama_jni.cpp` ile native llama.cpp çağrıları
-- **ChatML Template**: Prompt'ları `<|im_start|>user...` formatında sarmalama
-- **Stop Token Detection**: `<|im_end|>` görünce üretimi durdurma
-- **Sampling Parameters**: temperature, top_p, repeat_penalty
+### Tab 1: LLM (🤖)
+- Qwen 1.5 1.8B Q8 modeli ile chat
+- ChatML format desteği
+- TTFT, token/s, bellek metrikleri
+- HuggingFace'den model indirme
 
-### 2. Model İndirme (YENİ - 2026-01-18)
-- **HuggingFace Download**: Uygulama içinden model indirme
-- **Progress UI**: %, MB/Toplam MB, Mbps hız göstergesi
-- **Notification**: Sistem bildiriminde indirme durumu
-- **Model Seçimi**: Dropdown ile mevcut modellerden seçim
-- **Debug Mode**: "Force No Model" checkbox'ı ile test
+### Tab 2: Photos (📷)
+- **Files**: Fotoğraf listesi (index durumu ile)
+- **Search**: OCR + CLIP ile arama
+- Match type badge'leri: OCR, CLIP, HYBRID
+- Fullscreen viewer (pinch-to-zoom)
 
-### 3. Performans Metrikleri
-- **TTFT**: Time To First Token (Prefill süresi)
-- **Decode Speed**: Saniyede üretilen token
-- **Memory**: Native heap kullanımı
+### Resource Bar
+- CPU kullanımı (sistem + uygulama)
+- RAM kullanımı (cihaz + uygulama)
 
 ---
 
-## JNI Fonksiyonları
+## 🛠️ Kurulum
 
-```kotlin
-// Model yükleme
-private external fun loadModelNative(path: String): Boolean
+### 1. Gereksinimler
+- Android Studio Iguana+
+- JDK 17
+- NDK 26.1.x
+- ARM64 Android telefon
 
-// Text üretme
-private external fun generateNative(
-    prompt: String,
-    maxTokens: Int,        // 256 default
-    temperature: Float,    // 0.7 default
-    topP: Float,           // 0.9 default
-    repeatPenalty: Float,  // 1.1 default
-    useChatTemplate: Boolean
-): String
-
-// Metrikleri al
-private external fun getPrefillTimeNative(): Long
-private external fun getDecodeTimeNative(): Long
-private external fun getTokensGeneratedNative(): Int
-private external fun getMemoryUsageNative(): Long
-
-// Cleanup
-private external fun unloadNative()
-private external fun isModelLoadedNative(): Boolean
-```
-
----
-
-## Model Download Sistemi
-
-### Akış
-```
-1. Uygulama açılır → ModelRepository.isModelDownloaded() kontrol
-2. Model yoksa → "Download" butonu göster
-3. Download başlat → HuggingFace'ten indir
-4. Progress update → UI ve notification güncelle
-5. Tamamlandı → "Load Model" butonu göster
-```
-
-### Download URL
-```
-https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q8_0.gguf
-```
-
-### Dosya Konumu
-```
-/sdcard/Android/data/com.aksoyapps.edgeqslm/files/qwen1_5-1_8b-chat-q8_0.gguf
-```
-
----
-
-## Build ve Çalıştırma
-
-### Build
+### 2. Build ve Yükleme
 ```bash
-# Debug APK oluştur
+cd /Users/hasanaksoy/AntigravityProjects/EdgeQ-SLM
+
+# Build
 ./gradlew :composeApp:assembleDebug
 
-# APK konumu
-composeApp/build/outputs/apk/debug/composeApp-debug.apk
-```
-
-### Cihaza Yükle
-```bash
-# ADB ile yükle
+# Yükle
 adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
-
-# Uygulamayı başlat
-adb shell am start -n com.aksoyapps.edgeqslm/.MainActivity
 ```
 
-### Manuel Model Yükleme (Opsiyonel)
+### 3. Model Yükleme
 ```bash
-# Dizini oluştur
-adb shell mkdir -p /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
-
-# Modeli kopyala
+# LLM modeli (~1.8GB)
 adb push qwen-q8_0.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
+
+# CLIP modelleri (~660MB)
+adb push clip-vit-b32-image.onnx /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
+adb push clip-vit-b32-text.onnx /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
+adb push -r clip_tokenizer/ /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
 ```
 
-### Logcat
+### 4. İzinler
+- **All Files Access**: Ayarlar → Uygulamalar → EdgeQ-SLM → İzinler → Tüm dosyalara erişim
+
+---
+
+## 📂 Dosya Yapısı
+
+```
+EdgeQ-SLM/
+├── composeApp/
+│   └── src/androidMain/kotlin/
+│       ├── MainActivity.kt         # Ana ekran, navigation, resource bar
+│       └── photos/
+│           └── PhotoSearchScreen.kt # Fotoğraf arama UI
+├── shared/
+│   └── src/androidMain/kotlin/
+│       ├── AndroidLlamaCppEngine.kt # LLM JNI bridge
+│       └── photos/
+│           ├── PhotoIndexer.kt      # OCR + CLIP indexing
+│           ├── PhotoVectorStore.kt  # SQLite veritabanı
+│           ├── ClipImageEncoder.kt  # CLIP görsel encoder
+│           ├── ClipTextEncoder.kt   # CLIP metin encoder
+│           └── PhotoSearchViewModel.kt # State yönetimi
+└── docs/                            # Dokümantasyon
+```
+
+---
+
+## 🔧 Önemli Özellikler
+
+### Force Index (Zorla Yeniden Index)
+- Index butonuna **5 saniye basılı tut**
+- 2. saniyeden sonra progress bar dolmaya başlar
+- 5. saniyede veritabanı silinir ve tüm fotoğraflar yeniden indexlenir
+
+### Match Type Badge'leri
+| Badge | Renk | Anlam |
+|-------|------|-------|
+| OCR | Mavi | Metin içeriği ile eşleşti |
+| CLIP | Mor | Görsel benzerlik ile eşleşti |
+| HYBRID | Turuncu | Hem OCR hem CLIP eşleşti |
+
+### CLIP Sınırlamaları
+- **Sadece İngilizce**: "airplane" çalışır, "uçak" çalışmaz
+- **BPE Tokenizer eksik**: Basit kelime bazlı tokenization
+
+---
+
+## 🌿 Git Yapısı
+
+### Branch'ler
+| Branch | Açıklama |
+|--------|----------|
+| `main` | Eski, merge gerekiyor |
+| `feature/clip-visual-search` | **Güncel** - Tüm özellikler |
+| `feature/photo-search-ocr` | OCR özelliği |
+| `feature/model-download` | Model indirme |
+
+### Commit Komutları
 ```bash
-# Model repository logları
-adb logcat -s ModelRepository:D
+# Değişiklikleri stage'e ekle
+git add .
 
-# JNI logları
-adb logcat -s LlamaJNI:V AndroidLlamaCppEngine:V
+# Commit
+git commit -m "Açıklama"
+
+# Push
+git push origin feature/clip-visual-search
+
+# Main'e merge (opsiyonel)
+git checkout main
+git merge feature/clip-visual-search
+git push origin main
 ```
 
 ---
 
-## Troubleshooting (Sorun Giderme)
+## 🐛 Bilinen Sorunlar
 
-### "Model not found" hatası
-- Model yolunu kontrol et
-- `adb shell ls /sdcard/Android/data/com.aksoyapps.edgeqslm/files/`
-- Debug checkbox'ı aktif mi kontrol et
-
-### "Download failed: connection abort"
-- İnternet bağlantısını kontrol et
-- WiFi kullan (mobil veri yavaş olabilir)
-- Uygulamayı yeniden başlat
-
-### "Read permission" hatası
-- Model `/sdcard/Android/data/com.aksoyapps.edgeqslm/files/` içinde olmalı
-- Downloads klasöründen çalışmaz (scoped storage)
-
-### Build hatası: "ffast-math"
-- CMakeLists.txt'de `-fno-finite-math-only` flag'i var mı kontrol et
-
-### Emulator'da çalışmıyor
-- Sadece arm64-v8a ABI destekleniyor
-- Gerçek ARM64 cihaz kullan
+| Sorun | Neden | Çözüm |
+|-------|-------|-------|
+| Sistem CPU 0% | Android SELinux /proc/loadavg erişimi engelliyor | Düzeltilmedi |
+| CLIP "airplane" çalışmıyor | BPE tokenizer tam değil | İyileştirme bekliyor |
+| Türkçe arama çalışmıyor | CLIP İngilizce eğitimli | İngilizce kullan |
 
 ---
 
-## Gelecek Çalışmalar
+## 📊 Performans Metrikleri
 
-1. **INT4 Quantization**: Q4_0 modeli ile hız karşılaştırması
-2. **GPU Offload**: `GGML_OPENCL` veya `GGML_VULKAN` ile GPU kullanımı
-3. **iOS Tamamlama**: iOS download ve inference
-4. **Streaming Output**: Token-by-token çıktı
-5. **Energy Profiling**: Batarya tüketimi ölçümü
-
----
-
-## Paket Bilgileri
-
-| Özellik | Değer |
-|---------|-------|
-| Package Name | com.aksoyapps.edgeqslm |
-| Min SDK | 24 (Android 7.0) |
-| Target SDK | 34 (Android 14) |
-| NDK Version | 26.1.10909125 |
-| Architecture | arm64-v8a |
-| Model Size | ~1.86 GB |
+| Metrik | Değer |
+|--------|-------|
+| LLM Model Boyutu | 1.86 GB |
+| CLIP Model Boyutu | ~660 MB |
+| LLM Yükleme Süresi | ~5 saniye |
+| CLIP Yükleme Süresi | ~3 saniye |
+| Inference Hızı | 15-25 token/s |
+| Toplam RAM Kullanımı | ~2-3 GB |
 
 ---
 
-*Son Güncelleme: 2026-01-18*
+## 🚀 Sonraki Adımlar
+
+1. ✅ ~~OCR entegrasyonu~~
+2. ✅ ~~CLIP visual search~~
+3. ✅ ~~Resource monitoring~~
+4. ⏳ CLIP BPE tokenizer iyileştirme
+5. ⏳ RAG entegrasyonu (LLM + Photo context)
+6. ⏳ Performans ölçümleri dokümante et
+7. ⏳ main branch'e merge
+
+---
+
+## 📝 Logcat Komutları
+
+```bash
+# Genel uygulama logları
+adb logcat -s "PhotoIndexer" "ClipTextEncoder" "PhotoSearchVM"
+
+# CLIP tokenizer debug
+adb logcat | grep "ClipTextEncoder"
+
+# Tüm hataları gör
+adb logcat *:E | grep edgeqslm
+```
+
+---
+
+*Son güncelleme: 2026-01-21*

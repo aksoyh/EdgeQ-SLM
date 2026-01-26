@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.androidLibrary)
     alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.kotlinSerialization)
 }
 
 kotlin {
@@ -21,6 +22,7 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.ktor.client.core)
+            implementation(libs.kotlinx.serialization.json)
         }
         androidMain.dependencies {
             implementation(libs.kotlinx.coroutines.android)
@@ -53,10 +55,15 @@ android {
         externalNativeBuild {
             cmake {
                 // CMake arguments for llama.cpp build
+                // LLAMA_CPP_PATH can be set in local.properties or as environment variable
+                val llamaCppPath = project.findProperty("LLAMA_CPP_PATH")?.toString()
+                    ?: System.getenv("LLAMA_CPP_PATH")
+                    ?: "${System.getProperty("user.home")}/llama.cpp"
+                
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
                     "-DCMAKE_BUILD_TYPE=Release",
-                    "-DLLAMA_CPP_PATH=/Users/hasanaksoy/llama.cpp"
+                    "-DLLAMA_CPP_PATH=$llamaCppPath"
                 )
                 // Use safe math flags compatible with llama.cpp
                 cppFlags += listOf("-O3", "-fno-finite-math-only")

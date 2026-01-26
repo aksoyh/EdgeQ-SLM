@@ -13,6 +13,7 @@ Read the following files to understand the current project state:
 # Primary context
 view docs/SESSION_NOTES.md
 view docs/PROGRESS_REPORT.md
+view GUIDELINE.md
 ```
 
 ## 2. Check Git Status
@@ -38,6 +39,9 @@ git log -n 5 --oneline
 | `shared/src/commonMain/kotlin/.../LlmViewModel.kt` | State management |
 | `composeApp/src/commonMain/kotlin/.../App.kt` | Main UI |
 | `shared/src/androidMain/cpp/llama_jni.cpp` | JNI bridge |
+| `shared/.../benchmark/BenchmarkRunner.kt` | Experiment orchestrator |
+| `shared/.../benchmark/BenchmarkModels.kt` | Benchmark data classes |
+| `composeApp/.../benchmark/BenchmarkScreen.kt` | Benchmark UI |
 
 ### Build Commands
 // turbo
@@ -50,7 +54,7 @@ git log -n 5 --oneline
 adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
 ```
 
-### Completed Features (as of 2026-01-18)
+### Completed Features (as of 2026-01-26)
 - [x] Model loading via JNI/llama.cpp
 - [x] Text generation with ChatML template
 - [x] Performance metrics (TTFT, tokens/sec, memory)
@@ -59,12 +63,32 @@ adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
 - [x] Model selection dropdown
 - [x] Debug checkbox for testing
 - [x] Package rename to com.aksoyapps
+- [x] **Benchmark Framework** - Complete measurement layer
+  - Temperature sweep experiments
+  - Prompt set (18 prompts across categories)
+  - Sanity checks for output quality (RQ2)
+  - CSV/JSON export
+  - Progress tracking UI
+  - Results visualization with charts
+- [x] **Documentation** for thesis proof-of-work
+  - EXPERIMENT_PROTOCOL.md
+  - PROOF_OF_WORK_TEMPLATE.md
+  - NOTES_TR.md (Turkish explanations)
+  - GUIDELINE.md
 
 ### Next Steps
-- [ ] Collect Android performance benchmarks
+- [ ] Run full benchmark on device
 - [ ] INT4 quantization comparison
 - [ ] iOS implementation completion
 - [ ] GPU/NPU acceleration testing
+
+### Documentation
+| Document | Purpose |
+|----------|---------|
+| `GUIDELINE.md` | Measurement and logging guidelines |
+| `docs/EXPERIMENT_PROTOCOL.md` | Academic methodology |
+| `docs/PROOF_OF_WORK_TEMPLATE.md` | Report template |
+| `docs/NOTES_TR.md` | Turkish notes |
 
 ## 4. After Reading Context
 Confirm understanding and ask user what to work on next.

@@ -1,0 +1,138 @@
+{
+    "version": "1.0",
+    "description": "Fixed prompt set for EdgeQ-SLM benchmarking experiments",
+    "categories": {
+        "factual": "Factual Q&A prompts requiring knowledge retrieval",
+        "instruction": "Instruction-following prompts requiring task completion",
+        "creative": "Creative writing prompts requiring generation",
+        "edge": "Edge case prompts for stress testing"
+    },
+    "prompts": [
+        {
+            "id": "factual_short_01",
+            "text": "What is the capital of France?",
+            "category": "FACTUAL_SHORT",
+            "expectedMinTokens": 5,
+            "description": "Simple geography fact"
+        },
+        {
+            "id": "factual_short_02",
+            "text": "How many planets are in our solar system?",
+            "category": "FACTUAL_SHORT",
+            "expectedMinTokens": 5,
+            "description": "Basic astronomy fact"
+        },
+        {
+            "id": "factual_medium_01",
+            "text": "Explain what photosynthesis is and why it is important for life on Earth.",
+            "category": "FACTUAL_MEDIUM",
+            "expectedMinTokens": 30,
+            "description": "Biology concept explanation"
+        },
+        {
+            "id": "factual_medium_02",
+            "text": "What are the main differences between RAM and ROM in computers?",
+            "category": "FACTUAL_MEDIUM",
+            "expectedMinTokens": 40,
+            "description": "Computer science concept"
+        },
+        {
+            "id": "factual_long_01",
+            "text": "Describe the process of how vaccines work in the human body, including the role of antibodies and memory cells in providing immunity against diseases.",
+            "category": "FACTUAL_LONG",
+            "expectedMinTokens": 80,
+            "description": "Complex immunology explanation"
+        },
+        {
+            "id": "instruction_short_01",
+            "text": "List 5 fruits that are red in color.",
+            "category": "INSTRUCTION_SHORT",
+            "expectedMinTokens": 10,
+            "description": "Simple list generation"
+        },
+        {
+            "id": "instruction_short_02",
+            "text": "Translate 'Hello, how are you?' to Spanish.",
+            "category": "INSTRUCTION_SHORT",
+            "expectedMinTokens": 5,
+            "description": "Simple translation task"
+        },
+        {
+            "id": "instruction_medium_01",
+            "text": "Write a Python function that calculates the factorial of a number. Include a docstring explaining what the function does.",
+            "category": "INSTRUCTION_MEDIUM",
+            "expectedMinTokens": 40,
+            "description": "Code generation with documentation"
+        },
+        {
+            "id": "instruction_medium_02",
+            "text": "Create a bullet-point summary of the benefits and drawbacks of remote work. Include at least 3 points for each.",
+            "category": "INSTRUCTION_MEDIUM",
+            "expectedMinTokens": 50,
+            "description": "Structured list generation"
+        },
+        {
+            "id": "instruction_long_01",
+            "text": "Write a step-by-step tutorial for beginners explaining how to set up a basic HTML webpage with CSS styling. Include example code for each step and explain what each part does.",
+            "category": "INSTRUCTION_LONG",
+            "expectedMinTokens": 100,
+            "description": "Detailed tutorial with code"
+        },
+        {
+            "id": "creative_short_01",
+            "text": "Write a haiku about autumn leaves.",
+            "category": "CREATIVE_SHORT",
+            "expectedMinTokens": 10,
+            "description": "Constrained poetry"
+        },
+        {
+            "id": "creative_short_02",
+            "text": "Create a catchy slogan for an eco-friendly water bottle company.",
+            "category": "CREATIVE_SHORT",
+            "expectedMinTokens": 8,
+            "description": "Marketing slogan"
+        },
+        {
+            "id": "creative_medium_01",
+            "text": "Write a short dialogue between a curious child and a wise old tree. The child asks about the meaning of life.",
+            "category": "CREATIVE_MEDIUM",
+            "expectedMinTokens": 60,
+            "description": "Character dialogue"
+        },
+        {
+            "id": "creative_medium_02",
+            "text": "Describe a futuristic city in the year 2150 where humans and AI coexist harmoniously. Focus on daily life.",
+            "category": "CREATIVE_MEDIUM",
+            "expectedMinTokens": 70,
+            "description": "Sci-fi world building"
+        },
+        {
+            "id": "creative_long_01",
+            "text": "Write the opening paragraph of a mystery novel. Set the scene in a small coastal town on a foggy morning. Introduce a detective who has just arrived to investigate a disappearance. Create atmosphere and intrigue.",
+            "category": "CREATIVE_LONG",
+            "expectedMinTokens": 100,
+            "description": "Novel opening"
+        },
+        {
+            "id": "edge_vshort_01",
+            "text": "Hi",
+            "category": "EDGE_VERY_SHORT",
+            "expectedMinTokens": 3,
+            "description": "Minimal greeting"
+        },
+        {
+            "id": "edge_vshort_02",
+            "text": "?",
+            "category": "EDGE_VERY_SHORT",
+            "expectedMinTokens": 1,
+            "description": "Single character input"
+        },
+        {
+            "id": "edge_vlong_01",
+            "text": "You are an expert in mobile application development and machine learning optimization. I am working on a thesis project that involves running a Small Language Model (SLM) on mobile devices. The model is quantized using INT8 quantization and runs through llama.cpp. I need you to analyze the following scenario and provide detailed recommendations: 1. What are the key performance bottlenecks when running transformer models on ARM64 mobile CPUs? 2. How does INT8 quantization affect model quality versus speed tradeoffs? 3. What memory optimization techniques should I consider for devices with limited RAM (4-6GB)? 4. How can I measure and report performance metrics in an academically rigorous way? 5. What are the limitations of on-device inference that I should acknowledge in my thesis? Please provide a comprehensive response covering all these points with specific technical details.",
+            "category": "EDGE_VERY_LONG",
+            "expectedMinTokens": 150,
+            "description": "Complex multi-part question"
+        }
+    ]
+}

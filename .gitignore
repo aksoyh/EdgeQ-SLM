@@ -38,3 +38,11 @@ local.properties
 *.gguf
 *.bin
 models/
+
+# Benchmark results (large files)
+results/*.csv
+results/*.json
+results/*.txt
+!results/README.md
+!results/*_sample.*
+

@@ -1,152 +1,135 @@
-# Session Notes - 2026-01-18 (Updated)
+# EdgeQ-SLM Session Notes
 
-## 📝 Summary
-This session focused on **model download implementation**, **package renaming**, and **Android device integration improvements**. We successfully implemented in-app model download from HuggingFace with progress tracking, fixed permission issues, added model selection UI, and updated the package name to `com.aksoyapps.edgeqslm`.
+## Session: 2026-01-21 (Latest)
 
----
+### Work Done
+- Updated all documentation to reflect current state
+- Created `PROJECT_VISION_AND_MILESTONES.md` explaining project goals
 
-## ✅ Completed Tasks
-
-### 1. Model Download Feature (NEW)
-- **HuggingFace Integration:** Implemented download from `huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF`
-- **Progress UI:** Added progress bar showing:
-  - Percentage complete (%)
-  - Downloaded / Total size (MB)
-  - Speed (Mbps)
-- **Notification:** System notification with download progress
-- **Model Selection:** Dropdown to choose from available `.gguf` files
-- **Debug Mode:** Checkbox to force "No Model" state for testing download flow
-
-### 2. Package Rename
-- Changed from `com.example.edgeqslm` to `com.aksoyapps.edgeqslm`
-- Updated all relevant files:
-  - `composeApp/build.gradle.kts`
-  - `shared/build.gradle.kts`
-  - `AndroidManifest.xml`
-  - All Kotlin package declarations
-  - JNI function names in `llama_jni.cpp`
-
-### 3. Cross-Platform Architecture
-- **ModelRepository expect/actual:** Common interface with platform-specific implementations
-- **Android:** Uses native `HttpURLConnection` for reliable large file downloads
-- **iOS:** Placeholder implementation (uses Ktor client)
-
-### 4. Previous Session Work (Morning)
-- **ChatML Support:** Wrap prompts in ChatML format
-- **Stop Token Detection:** Detect `<|im_end|>` and stop generation
-- **Sampling Parameters:** Exposed top_p, repeat_penalty via JNI
-- **UI Dashboard:** Real-time metrics (TTFT, Decode Speed, Memory)
+### Current State
+- All features working on Android
+- CLIP tokenizer needs BPE improvement for better accuracy
+- System CPU monitoring shows 0% due to Android restrictions
 
 ---
 
-## 🚧 Issues Encountered & Solutions
+## Session: 2026-01-19
 
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| Google Drive warning page | Files >100MB trigger virus scan | Switched to HuggingFace direct URL |
-| Ktor "connection abort" | Memory issues with 1.8GB file | Replaced Ktor with native HttpURLConnection |
-| Read permission error | Scoped storage on Downloads folder | Use app's external files directory |
-| FlowCollector scope mismatch | Nested function couldn't emit | Inlined download logic in Flow |
-| Duplicate import | FileOutputStream imported twice | Removed duplicate |
-| Model not detected after download | Priority check incorrect | App files dir checked first |
+### Work Done
+1. **CLIP Visual Search**
+   - Integrated CLIP ViT-B/32 models (image + text)
+   - Added image embedding generation during indexing
+   - Implemented cosine similarity search
+   - Created hybrid search (OCR + CLIP combined)
 
----
+2. **Match Type Badges**
+   - OCR matches: Blue badge
+   - CLIP matches: Purple badge
+   - Hybrid matches: Orange badge
+   - Match reason shown below each result
 
-## 📁 Files Created/Modified
+3. **Force Index Feature**
+   - Long-press (5 seconds) triggers force re-indexing
+   - Progress bar fills during hold
+   - Clears database and re-indexes all photos
 
-### New Files
-```
-shared/src/commonMain/kotlin/com/aksoyapps/edgeqslm/ModelRepository.kt
-shared/src/androidMain/kotlin/com/aksoyapps/edgeqslm/ModelRepository.android.kt
-shared/src/iosMain/kotlin/com/aksoyapps/edgeqslm/ModelRepository.ios.kt
-```
+4. **Resource Monitoring Bar**
+   - Added above bottom navigation
+   - Shows: Device CPU, App CPU, Device RAM, App RAM
+   - Updates every 2 seconds
 
-### Modified Files
-```
-shared/src/commonMain/kotlin/com/aksoyapps/edgeqslm/LlmViewModel.kt
-composeApp/src/commonMain/kotlin/com/aksoyapps/edgeqslm/App.kt
-composeApp/src/androidMain/kotlin/com/aksoyapps/edgeqslm/MainActivity.kt
-composeApp/src/iosMain/kotlin/com/aksoyapps/edgeqslm/MainViewController.kt
-composeApp/src/androidMain/AndroidManifest.xml
-composeApp/build.gradle.kts
-shared/build.gradle.kts
-gradle/libs.versions.toml
-docs/PROGRESS_REPORT.md
-README.md
-```
+5. **UI Improvements**
+   - Made Photo Search page fully scrollable
+   - Aligned Index and Refresh button heights
+   - Added CLIP loading indicator with spinner
 
----
+### Issues Encountered
+- CLIP tokenizer uses simple word-level tokenization instead of BPE
+- System CPU shows 0% due to Android SELinux restrictions on /proc
+- Some photos not matching CLIP search despite visual similarity
 
-## 🔧 Technical Reference
-
-### Key Commands
-
-**Push Model Manually:**
-```bash
-adb push qwen-q8_0.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
-```
-
-**Build & Install:**
-```bash
-./gradlew :composeApp:assembleDebug
-adb install -r composeApp/build/outputs/apk/debug/composeApp-debug.apk
-```
-
-**Logcat Monitoring:**
-```bash
-adb logcat -s ModelRepository:D LlamaJNI:V
-```
-
-**Git Branch:**
-```bash
-git checkout feature/model-download
-git push -u origin feature/model-download
-```
-
-### Download URL
-```
-https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q8_0.gguf
-```
-
-### Model Storage Paths
-| Priority | Path | Permissions |
-|----------|------|-------------|
-| 1 | `/sdcard/Android/data/com.aksoyapps.edgeqslm/files/` | No special permissions |
-| 2 | `/sdcard/Download/` | May require READ_EXTERNAL_STORAGE |
+### Technical Notes
+- Updated ONNX Runtime from 1.16.3 to 1.18.0 for IR version 10 support
+- CLIP models stored in `/sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/`
+- Vocab.json uses `</w>` suffix for complete words
 
 ---
 
-## 📋 Status & Next Steps
+## Session: 2026-01-18
 
-### ✅ Completed
-- [x] Model download from HuggingFace
-- [x] Progress UI with speed/size info
-- [x] Model selection dropdown
-- [x] Debug checkbox for testing
-- [x] Package rename to com.aksoyapps
-- [x] Documentation updated
-- [x] Git push to feature/model-download
+### Work Done
+1. **Photo Search with OCR**
+   - Added ML Kit OCR integration
+   - Created PhotoIndexer for folder scanning
+   - Implemented SQLite storage in PhotoVectorStore
+   - Built PhotoSearchScreen with search UI
+   - Added fullscreen photo viewer with pinch-to-zoom
 
-### 🔜 Next Actions
-1. **Benchmark Collection:** Record TTFT, tokens/sec, memory on device
-2. **INT4 Testing:** Quantize to Q4_0, compare speed vs quality
-3. **iOS Testing:** Verify iOS build works
-4. **Merge:** Review and merge feature branch to main
+2. **Model Download Feature**
+   - Switched from Google Drive to HuggingFace
+   - Added progress bar with speed/size info
+   - System notification during download
+   - Model selection dropdown
 
----
+3. **Package Rename**
+   - Changed from com.example to com.aksoyapps
 
-## 📊 Config Reference
-
-| Setting | Value |
-|---------|-------|
-| Model | Qwen 1.5 1.8B Chat (INT8 / Q8_0) |
-| Size | ~1.86 GB |
-| Context | 4096 tokens |
-| Threads | 4 |
-| Package | com.aksoyapps.edgeqslm |
-| Min SDK | 24 |
-| Target SDK | 34 |
+### Issues Encountered
+- Google Drive download blocked due to virus scan page
+- Ktor memory issues with large file download
+- Scoped storage restrictions on Downloads folder
 
 ---
 
-*Last Updated: 2026-01-18 20:23*
+## Session: 2026-01-17
+
+### Work Done
+1. **LLM Integration**
+   - Created JNI bridge (llama_jni.cpp)
+   - Configured CMake for ARM64 cross-compilation
+   - Implemented AndroidLlamaCppEngine
+   - Added ChatML template support
+   - Created metrics dashboard (TTFT, tokens/s, memory)
+
+2. **Model Preparation**
+   - Downloaded Qwen 1.5 1.8B
+   - Converted to GGUF format
+   - Quantized to INT8 (Q8_0)
+
+### Issues Encountered
+- Java 25 incompatible with AGP
+- Makefile deprecated, switched to CMake
+- -ffast-math error in GGML
+
+---
+
+## Session: 2025-11-19
+
+### Work Done
+- Initial project setup
+- Created Kotlin Multiplatform project structure
+- Set up Compose Multiplatform for UI
+- Configured Gradle build system
+
+---
+
+## Pending Tasks
+
+### High Priority
+- [ ] Implement proper BPE tokenizer for CLIP
+- [ ] Merge feature/clip-visual-search to main
+- [ ] Collect performance metrics on device
+
+### Medium Priority
+- [ ] INT4 quantization testing
+- [ ] GPU/NPU acceleration exploration
+- [ ] Multiple device benchmarks
+
+### Low Priority
+- [ ] iOS implementation
+- [ ] RAG integration (LLM + Photo context)
+- [ ] Voice input support
+
+---
+
+*Last updated: 2026-01-21*

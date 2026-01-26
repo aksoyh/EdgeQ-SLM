@@ -1,0 +1,29 @@
+[
+    {
+        "prompt_id": "factual_short_01",
+        "prompt_text": "What is the capital of France?",
+        "temperature": 0.7,
+        "output_text": "The capital of France is Paris. Paris is not only the capital but also the largest city in France, known for its iconic landmarks such as the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral.",
+        "tokens_generated": 45,
+        "latency_ms": 2847,
+        "is_coherent": true
+    },
+    {
+        "prompt_id": "instruction_short_01",
+        "prompt_text": "List 5 fruits that are red in color.",
+        "temperature": 0.7,
+        "output_text": "Here are 5 red fruits:\n1. Apple\n2. Strawberry\n3. Cherry\n4. Raspberry\n5. Watermelon (the flesh is red)",
+        "tokens_generated": 38,
+        "latency_ms": 2156,
+        "is_coherent": true
+    },
+    {
+        "prompt_id": "creative_short_01",
+        "prompt_text": "Write a haiku about autumn leaves.",
+        "temperature": 0.7,
+        "output_text": "Crimson leaves descend,\nWhispering secrets of time,\nNature's last ballet.",
+        "tokens_generated": 22,
+        "latency_ms": 1523,
+        "is_coherent": true
+    }
+]

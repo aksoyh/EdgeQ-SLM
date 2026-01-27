@@ -11,7 +11,7 @@ data class RunConfig(
     val promptText: String,
     val promptCategory: PromptCategory,
     val temperature: Float,
-    val maxTokens: Int = 256,
+    val maxTokens: Int = 2048,
     val topP: Float = 0.9f,
     val repeatPenalty: Float = 1.1f,
     val repeatIndex: Int = 0,         // Which repeat this is (0-based)

@@ -5,7 +5,7 @@ package com.aksoyapps.edgeqslm
  */
 data class GenerationRequest(
     val prompt: String,
-    val maxTokens: Int = 256,                    // Increased from 128 for longer responses
+    val maxTokens: Int = 2048,                   // Maximum tokens for longer responses
     val temperature: Float = 0.7f,
     val topP: Float = 0.9f,                      // Nucleus sampling
     val repeatPenalty: Float = 1.1f,             // Prevent repetition

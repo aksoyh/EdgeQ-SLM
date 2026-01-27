@@ -14,8 +14,8 @@ import kotlinx.coroutines.launch
 data class UiState(
     // Input
     val prompt: String = "What is the capital of Poland?",
-    val maxTokens: Int = 256,           // Increased for longer responses
-    val temperature: Float = 0.7f,
+    val maxTokens: Int = 128,            // Default tokens for UI
+    val temperature: Float = 0.3f,
     val topP: Float = 0.9f,              // Nucleus sampling
     val repeatPenalty: Float = 1.1f,     // Prevent repetition
     val useChatTemplate: Boolean = true,  // Use ChatML format
@@ -165,11 +165,25 @@ class LlmViewModel(
     }
     
     /**
-     * Download model from Google Drive
+     * Download the currently selected model from dropdown.
+     * Uses downloadModelByInfo to download based on ModelInfo.
      */
     fun downloadModel() {
         val repo = repository ?: run {
             _uiState.value = _uiState.value.copy(error = "Repository not initialized")
+            return
+        }
+        
+        // Get the selected model from the list
+        val selectedModel = _uiState.value.availableModels.getOrNull(_uiState.value.selectedModelIndex)
+        
+        if (selectedModel == null) {
+            _uiState.value = _uiState.value.copy(error = "No model selected")
+            return
+        }
+        
+        if (!selectedModel.isDownloadable) {
+            _uiState.value = _uiState.value.copy(error = "This model is already downloaded")
             return
         }
         
@@ -180,7 +194,8 @@ class LlmViewModel(
                 error = null
             )
             
-            repo.downloadModel().collect { status ->
+            // Use the new downloadModelByInfo function
+            repo.downloadModelByInfo(selectedModel).collect { status ->
                 when (status) {
                     is DownloadStatus.Progress -> {
                         _uiState.value = _uiState.value.copy(
@@ -197,6 +212,8 @@ class LlmViewModel(
                             modelExists = true,
                             modelPath = repo.getModelPath()
                         )
+                        // Refresh model list after download
+                        loadAvailableModels()
                     }
                     is DownloadStatus.Error -> {
                         _uiState.value = _uiState.value.copy(

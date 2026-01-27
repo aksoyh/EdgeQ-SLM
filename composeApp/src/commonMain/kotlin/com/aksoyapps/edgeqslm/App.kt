@@ -199,11 +199,22 @@ private fun ModelStatusCard(uiState: UiState, viewModel: LlmViewModel) {
                                             style = MaterialTheme.typography.bodyMedium
                                         )
                                         val sizeMB = model.sizeBytes / (1024 * 1024)
-                                        Text(
-                                            text = "${sizeMB} MB",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Text(
+                                                text = "${sizeMB} MB",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            if (model.description.isNotEmpty()) {
+                                                Text(
+                                                    text = "• ${model.description}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
                                     }
                                 },
                                 onClick = {
@@ -211,7 +222,7 @@ private fun ModelStatusCard(uiState: UiState, viewModel: LlmViewModel) {
                                     showModelDropdown = false
                                 },
                                 leadingIcon = {
-                                    Text(if (model.isDownloadable) "📥" else "📄")
+                                    Text(if (model.isDownloadable) "📥" else "✅")
                                 }
                             )
                         }
@@ -245,27 +256,7 @@ private fun ModelStatusCard(uiState: UiState, viewModel: LlmViewModel) {
                     )
                 }
             }
-            
-            // Debug Checkbox (for testing download UI)
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clickable { viewModel.setDebugForceNoModel(!uiState.debugForceNoModel) }
-                    .padding(vertical = 4.dp)
-            ) {
-                Checkbox(
-                    checked = uiState.debugForceNoModel,
-                    onCheckedChange = { viewModel.setDebugForceNoModel(it) },
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "🔧 Debug: Force 'No Model'",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+
         }
     }
 }
@@ -459,9 +450,12 @@ private fun ActionButtonsRow(uiState: UiState, viewModel: LlmViewModel) {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Download / Check File / Load Model Button (conditional)
-            if (!uiState.modelExists && !uiState.isDownloading) {
-                // Download Button
+            // Check if selected model needs downloading
+            val selectedModel = uiState.availableModels.getOrNull(uiState.selectedModelIndex)
+            val needsDownload = selectedModel?.isDownloadable == true
+            
+            if (needsDownload && !uiState.isDownloading) {
+                // Download Button - selected model not yet downloaded
                 Button(
                     onClick = { viewModel.downloadModel() },
                     enabled = !uiState.isLoading,
@@ -476,15 +470,15 @@ private fun ActionButtonsRow(uiState: UiState, viewModel: LlmViewModel) {
                 
                 // Check File Button
                 OutlinedButton(
-                    onClick = { viewModel.checkModelExistence() },
+                    onClick = { viewModel.loadAvailableModels() },
                     enabled = !uiState.isLoading,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("🔄 Check")
+                    Text("🔄 Refresh")
                 }
-            } else if (uiState.modelExists) {
-                // Load Model Button
+            } else if (!needsDownload && selectedModel != null) {
+                // Load Model Button - selected model is already downloaded
                 Button(
                     onClick = { viewModel.loadModel() },
                     enabled = !uiState.isLoading && !uiState.isModelLoaded,

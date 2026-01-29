@@ -14,11 +14,23 @@ import java.nio.ByteOrder
 class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
     
     override fun onCreate(db: SQLiteDatabase) {
-        // Main photos table
+        // Scan folders table - each folder has its own set of indexed photos
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS scan_folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_path TEXT UNIQUE NOT NULL,
+                folder_name TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_indexed_at INTEGER
+            )
+        """)
+        
+        // Main photos table with folder_id foreign key
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS photos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_path TEXT UNIQUE NOT NULL,
+                folder_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
                 file_name TEXT NOT NULL,
                 date_taken INTEGER,
                 width INTEGER,
@@ -27,19 +39,61 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
                 image_embedding BLOB,
                 text_embedding BLOB,
                 indexed_at INTEGER NOT NULL,
-                file_modified INTEGER NOT NULL
+                file_modified INTEGER NOT NULL,
+                vlm_description TEXT,
+                vlm_tags TEXT,
+                vlm_indexed_at INTEGER,
+                UNIQUE(folder_id, file_path),
+                FOREIGN KEY (folder_id) REFERENCES scan_folders(id)
             )
         """)
         
-        // Index on file_path and ocr_text for quick lookups
+        // Indexes
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_path ON photos(file_path)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_modified ON photos(file_modified)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_ocr ON photos(ocr_text)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_vlm_tags ON photos(vlm_tags)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_folders_path ON scan_folders(folder_path)")
     }
     
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS photos")
-        onCreate(db)
+        // Migration from version 3 to 4: Add scan_folders table
+        if (oldVersion < 4) {
+            try {
+                // Create scan_folders table
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS scan_folders (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        folder_path TEXT UNIQUE NOT NULL,
+                        folder_name TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        last_indexed_at INTEGER
+                    )
+                """)
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_folders_path ON scan_folders(folder_path)")
+                
+                // Add folder_id column (default to 1 for existing data)
+                db.execSQL("ALTER TABLE photos ADD COLUMN folder_id INTEGER DEFAULT 1")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id)")
+                
+                android.util.Log.i("PhotoVectorStore", "Migrated to version 4 with scan_folders")
+            } catch (e: Exception) {
+                android.util.Log.w("PhotoVectorStore", "Migration v4: ${e.message}")
+            }
+        }
+        
+        // Handle VLM columns (from v2 to v3)
+        if (oldVersion < 3) {
+            try {
+                db.execSQL("ALTER TABLE photos ADD COLUMN vlm_description TEXT")
+                db.execSQL("ALTER TABLE photos ADD COLUMN vlm_tags TEXT")
+                db.execSQL("ALTER TABLE photos ADD COLUMN vlm_indexed_at INTEGER")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_vlm_tags ON photos(vlm_tags)")
+            } catch (e: Exception) {
+                android.util.Log.w("PhotoVectorStore", "Migration v3: ${e.message}")
+            }
+        }
     }
     
     /**
@@ -48,6 +102,7 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
     fun upsertPhoto(photo: PhotoRecord): Long {
         val db = writableDatabase
         val values = ContentValues().apply {
+            put("folder_id", photo.folderId)
             put("file_path", photo.filePath)
             put("file_name", photo.fileName)
             put("date_taken", photo.dateTaken)
@@ -58,9 +113,27 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
             put("text_embedding", photo.textEmbedding?.toByteArray())
             put("indexed_at", System.currentTimeMillis())
             put("file_modified", photo.fileModified)
+            if (photo.vlmDescription != null) {
+                put("vlm_description", photo.vlmDescription)
+                put("vlm_tags", photo.vlmTags)
+                put("vlm_indexed_at", System.currentTimeMillis())
+            }
         }
         
         return db.insertWithOnConflict("photos", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+    
+    /**
+     * Update only VLM description for a photo
+     */
+    fun updateVlmDescription(filePath: String, description: String, tags: String): Int {
+        val db = writableDatabase
+        val values = ContentValues().apply {
+            put("vlm_description", description)
+            put("vlm_tags", tags)
+            put("vlm_indexed_at", System.currentTimeMillis())
+        }
+        return db.update("photos", values, "file_path = ?", arrayOf(filePath))
     }
     
     /**
@@ -321,15 +394,257 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
     
     companion object {
         private const val DATABASE_NAME = "photo_index.db"
-        private const val DATABASE_VERSION = 2  // Bumped version to recreate without FTS5
+        private const val DATABASE_VERSION = 4  // Bumped for scan_folders table
+    }
+    
+    /**
+     * Search VLM descriptions for matching photos
+     */
+    fun searchVlmDescriptions(query: String, limit: Int = 50): List<PhotoSearchResult> {
+        val db = readableDatabase
+        val searchTerms = query.lowercase().split(" ").filter { it.isNotBlank() && it.length > 1 }
+        
+        if (searchTerms.isEmpty()) return emptyList()
+        
+        // Build LIKE conditions for each search term in vlm_description and vlm_tags
+        val conditions = searchTerms.joinToString(" OR ") { 
+            "(LOWER(vlm_description) LIKE ? OR LOWER(vlm_tags) LIKE ? OR LOWER(file_name) LIKE ?)" 
+        }
+        val args = searchTerms.flatMap { 
+            listOf("%$it%", "%$it%", "%$it%") 
+        }.toTypedArray()
+        
+        val cursor = db.rawQuery("""
+            SELECT id, file_path, file_name, vlm_description, vlm_tags
+            FROM photos 
+            WHERE vlm_description IS NOT NULL AND ($conditions)
+            LIMIT ?
+        """, args + limit.toString())
+        
+        val results = mutableListOf<PhotoSearchResult>()
+        cursor.use {
+            while (it.moveToNext()) {
+                val description = it.getString(3) ?: ""
+                val tags = it.getString(4) ?: ""
+                val fileName = it.getString(2)
+                
+                // Calculate relevance score
+                val matchedInDesc = searchTerms.count { term -> 
+                    description.lowercase().contains(term) 
+                }
+                val matchedInTags = searchTerms.count { term -> 
+                    tags.lowercase().contains(term) 
+                }
+                val score = (matchedInDesc * 0.6f + matchedInTags * 0.4f) / searchTerms.size
+                
+                // Build match reason
+                val matchReason = buildString {
+                    if (matchedInTags > 0) append("Tags: $tags")
+                    else if (description.length > 80) append(description.take(80) + "...")
+                    else append(description)
+                }
+                
+                results.add(PhotoSearchResult(
+                    id = it.getLong(0),
+                    filePath = it.getString(1),
+                    fileName = fileName,
+                    ocrText = null,  // OCR text is separate
+                    score = score,
+                    matchType = "VLM",
+                    matchReason = matchReason,
+                    vlmDescription = description,
+                    vlmTags = tags
+                ))
+            }
+        }
+        return results.sortedByDescending { it.score }
+    }
+    
+    /**
+     * Get photos that don't have VLM descriptions yet, filtered by folder path
+     */
+    fun getPhotosWithoutVlmDescription(folderPath: String? = null, limit: Int = 1000): List<PhotoRecord> {
+        val db = readableDatabase
+        
+        val query = if (folderPath != null) {
+            """
+                SELECT id, file_path, file_name, date_taken, width, height, file_modified
+                FROM photos 
+                WHERE vlm_description IS NULL AND file_path LIKE ?
+                LIMIT ?
+            """
+        } else {
+            """
+                SELECT id, file_path, file_name, date_taken, width, height, file_modified
+                FROM photos 
+                WHERE vlm_description IS NULL
+                LIMIT ?
+            """
+        }
+        
+        val args = if (folderPath != null) {
+            arrayOf("$folderPath%", limit.toString())
+        } else {
+            arrayOf(limit.toString())
+        }
+        
+        val cursor = db.rawQuery(query, args)
+        
+        val photos = mutableListOf<PhotoRecord>()
+        cursor.use {
+            while (it.moveToNext()) {
+                photos.add(PhotoRecord(
+                    id = it.getLong(0),
+                    filePath = it.getString(1),
+                    fileName = it.getString(2),
+                    dateTaken = if (it.isNull(3)) null else it.getLong(3),
+                    width = if (it.isNull(4)) null else it.getInt(4),
+                    height = if (it.isNull(5)) null else it.getInt(5),
+                    fileModified = it.getLong(6)
+                ))
+            }
+        }
+        return photos
+    }
+    
+    /**
+     * Get count of VLM indexed photos
+     */
+    fun getVlmIndexedCount(): Int {
+        val db = readableDatabase
+        val cursor = db.rawQuery("SELECT COUNT(*) FROM photos WHERE vlm_description IS NOT NULL", null)
+        return cursor.use {
+            if (it.moveToFirst()) it.getInt(0) else 0
+        }
+    }
+    
+    /**
+     * Get count of VLM indexed photos for a specific folder
+     */
+    fun getVlmIndexedCount(folderId: Long): Int {
+        val db = readableDatabase
+        val cursor = db.rawQuery(
+            "SELECT COUNT(*) FROM photos WHERE folder_id = ? AND vlm_description IS NOT NULL", 
+            arrayOf(folderId.toString())
+        )
+        return cursor.use {
+            if (it.moveToFirst()) it.getInt(0) else 0
+        }
+    }
+    
+    /**
+     * Get or create a folder entry, returns folder ID
+     */
+    fun getOrCreateFolder(folderPath: String): Long {
+        val db = writableDatabase
+        
+        // Check if folder exists
+        val cursor = db.rawQuery(
+            "SELECT id FROM scan_folders WHERE folder_path = ?",
+            arrayOf(folderPath)
+        )
+        
+        return cursor.use {
+            if (it.moveToFirst()) {
+                it.getLong(0)
+            } else {
+                // Create new folder entry
+                val folderName = folderPath.substringAfterLast("/")
+                val values = ContentValues().apply {
+                    put("folder_path", folderPath)
+                    put("folder_name", folderName)
+                    put("created_at", System.currentTimeMillis())
+                }
+                db.insert("scan_folders", null, values)
+            }
+        }
+    }
+    
+    /**
+     * Get all scan folders
+     */
+    fun getScanFolders(): List<ScanFolder> {
+        val db = readableDatabase
+        val cursor = db.rawQuery("""
+            SELECT f.id, f.folder_path, f.folder_name, f.created_at, f.last_indexed_at,
+                   COUNT(p.id) as photo_count,
+                   SUM(CASE WHEN p.vlm_description IS NOT NULL THEN 1 ELSE 0 END) as vlm_count
+            FROM scan_folders f
+            LEFT JOIN photos p ON f.id = p.folder_id
+            GROUP BY f.id
+            ORDER BY f.created_at DESC
+        """, null)
+        
+        val folders = mutableListOf<ScanFolder>()
+        cursor.use {
+            while (it.moveToNext()) {
+                folders.add(ScanFolder(
+                    id = it.getLong(0),
+                    folderPath = it.getString(1),
+                    folderName = it.getString(2),
+                    createdAt = it.getLong(3),
+                    lastIndexedAt = if (it.isNull(4)) null else it.getLong(4),
+                    photoCount = it.getInt(5),
+                    vlmIndexedCount = it.getInt(6)
+                ))
+            }
+        }
+        return folders
+    }
+    
+    /**
+     * Update last indexed timestamp for a folder
+     */
+    fun updateFolderLastIndexed(folderId: Long) {
+        val db = writableDatabase
+        val values = ContentValues().apply {
+            put("last_indexed_at", System.currentTimeMillis())
+        }
+        db.update("scan_folders", values, "id = ?", arrayOf(folderId.toString()))
+    }
+    
+    /**
+     * Clear VLM descriptions and tags for all photos or specific folder
+     */
+    fun clearVlmDescriptions(folderPath: String? = null) {
+        val db = writableDatabase
+        val values = ContentValues().apply {
+            putNull("vlm_description")
+            putNull("vlm_tags")
+            putNull("vlm_indexed_at")
+        }
+        
+        val count = if (folderPath != null) {
+            // Use LIKE query on file_path to be consistent with getPhotosWithoutVlmDescription
+            // and robust against scan_folders mismatch
+            val likePath = "$folderPath%"
+            db.update("photos", values, "file_path LIKE ?", arrayOf(likePath))
+        } else {
+            db.update("photos", values, null, null)
+        }
+        android.util.Log.i("PhotoVectorStore", "Cleared VLM descriptions for $count photos (folder=$folderPath)")
     }
 }
+
+/**
+ * Scan folder entry
+ */
+data class ScanFolder(
+    val id: Long,
+    val folderPath: String,
+    val folderName: String,
+    val createdAt: Long,
+    val lastIndexedAt: Long?,
+    val photoCount: Int = 0,
+    val vlmIndexedCount: Int = 0
+)
 
 /**
  * Photo record for storage
  */
 data class PhotoRecord(
     val id: Long = 0,
+    val folderId: Long = 1,  // Default folder ID for backward compatibility
     val filePath: String,
     val fileName: String,
     val dateTaken: Long? = null,
@@ -338,7 +653,9 @@ data class PhotoRecord(
     val ocrText: String? = null,
     val imageEmbedding: FloatArray? = null,
     val textEmbedding: FloatArray? = null,
-    val fileModified: Long = 0
+    val fileModified: Long = 0,
+    val vlmDescription: String? = null,
+    val vlmTags: String? = null
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -359,5 +676,7 @@ data class PhotoSearchResult(
     val ocrText: String?,
     val score: Float,
     val matchType: String = "OCR",  // OCR, CLIP, or HYBRID
-    val matchReason: String = ""    // What matched
+    val matchReason: String = "",    // What matched
+    val vlmDescription: String? = null,
+    val vlmTags: String? = null
 )

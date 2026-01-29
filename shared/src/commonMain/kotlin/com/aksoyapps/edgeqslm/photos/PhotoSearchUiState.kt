@@ -5,6 +5,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
+ * Search mode - ML-based (CLIP+OCR) vs Vision LLM
+ */
+enum class SearchMode {
+    ML_BASED,   // CLIP embedding + OCR text search
+    VLM_BASED   // Vision Language Model analysis
+}
+
+/**
  * Photo Search UI State
  */
 data class PhotoSearchUiState(
@@ -12,6 +20,7 @@ data class PhotoSearchUiState(
     val searchQuery: String = "",
     val searchResults: List<PhotoSearchResultUi> = emptyList(),
     val isSearching: Boolean = false,
+    val searchMode: SearchMode = SearchMode.ML_BASED,  // Current search backend
     
     // Photo List (taranan/taranmayan)
     val photoFiles: List<PhotoFileUi> = emptyList(),
@@ -27,6 +36,13 @@ data class PhotoSearchUiState(
     val isModelLoading: Boolean = true,  // True while CLIP models are loading
     val isModelLoaded: Boolean = false,
     val modelLoadingMessage: String = "Loading CLIP models...",
+    val isVlmAvailable: Boolean = false,  // True if Vision LLM is loaded
+    
+    // VLM Indexing
+    val isVlmIndexing: Boolean = false,
+    val vlmIndexProgress: Float = 0f,
+    val vlmIndexMessage: String = "",
+    val vlmIndexedCount: Int = 0,
     
     // Folder
     val scanFolderPath: String = "",
@@ -58,15 +74,19 @@ data class PhotoSearchResultUi(
     val ocrText: String?,
     val score: Float,
     val thumbnailUri: String? = null,
-    val matchType: MatchType = MatchType.OCR,  // OCR or CLIP
-    val matchReason: String = ""  // e.g., "OCR: 'uçak bileti'" or "CLIP: visual similarity"
+    val matchType: MatchType = MatchType.OCR,
+    val matchReason: String = "",
+    val latencyMs: Long = 0,  // For benchmark comparison
+    val vlmDescription: String? = null,  // VLM generated description
+    val vlmTags: String? = null  // VLM generated tags
 )
 
 /**
  * Type of match
  */
 enum class MatchType {
-    OCR,    // Text match from OCR
-    CLIP,   // Visual similarity from CLIP
-    HYBRID  // Both OCR and CLIP
+    OCR,         // Text match from OCR
+    CLIP,        // Visual similarity from CLIP
+    HYBRID,      // Both OCR and CLIP
+    VISION_LLM   // Vision Language Model analysis
 }

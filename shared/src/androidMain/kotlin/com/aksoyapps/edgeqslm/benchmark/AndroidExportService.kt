@@ -270,6 +270,48 @@ class AndroidExportService(
             }
         }
     }
+    fun getLegacyExports(): List<LegacyExport> {
+        val legacyFiles = listOf("indexing_sessions.csv", "indexing_item_details.csv")
+        
+        // AndroidExportService writes to internal filesDir/results
+        // IndexingLogger writes to externalFilesDir/results
+        val internalDir = resultsDir
+        val externalDir = File(context.getExternalFilesDir(null), "results")
+        
+        val allFiles = mutableListOf<File>()
+        
+        legacyFiles.forEach { filename ->
+            val internalFile = File(internalDir, filename)
+            if (internalFile.exists()) allFiles.add(internalFile)
+            
+            val externalFile = File(externalDir, filename)
+            if (externalFile.exists()) allFiles.add(externalFile)
+        }
+        
+        return allFiles.map { file ->
+            LegacyExport(
+                filename = file.name,
+                displayDate = try {
+                    val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                    sdf.format(Date(file.lastModified()))
+                } catch (e: Exception) { "Unknown" },
+                filePath = file.absolutePath,
+                sizeBytes = file.length()
+            )
+        }.distinctBy { it.filePath }
+    }
+}
+
+/**
+ * Represents a single legacy CSV file (indexing logs).
+ */
+data class LegacyExport(
+    val filename: String,
+    val displayDate: String,
+    val filePath: String,
+    val sizeBytes: Long
+) {
+    val sizeKb: Float get() = sizeBytes / 1024f
 }
 
 /**

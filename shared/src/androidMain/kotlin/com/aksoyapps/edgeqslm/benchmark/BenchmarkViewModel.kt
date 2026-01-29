@@ -147,6 +147,9 @@ class BenchmarkViewModel(
                     results = event.results,
                     aggregatedStats = event.aggregatedStats
                 )
+                // Auto-export on completion
+                exportResults()
+                loadPreviousExports()
             }
             
             is BenchmarkEvent.Cancelled -> {
@@ -346,7 +349,12 @@ class BenchmarkViewModel(
     fun loadPreviousExports() {
         val androidExportService = exportService as? AndroidExportService ?: return
         val sessions = androidExportService.getPreviousExports()
-        _uiState.value = _uiState.value.copy(previousExports = sessions)
+        val legacy = androidExportService.getLegacyExports()
+        
+        _uiState.value = _uiState.value.copy(
+            previousExports = sessions,
+            legacyExports = legacy
+        )
     }
     
     /**
@@ -360,6 +368,22 @@ class BenchmarkViewModel(
                     androidExportService.shareExports(session.files)
                 } else {
                     _uiState.value = _uiState.value.copy(error = "No files to share")
+                }
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = "Share failed: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Share a legacy export file.
+     */
+    fun shareLegacyExport(export: com.aksoyapps.edgeqslm.benchmark.LegacyExport) {
+        scope.launch {
+            try {
+                val androidExportService = exportService as? AndroidExportService
+                if (androidExportService != null) {
+                    androidExportService.shareExports(listOf(export.filePath))
                 }
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = "Share failed: ${e.message}")

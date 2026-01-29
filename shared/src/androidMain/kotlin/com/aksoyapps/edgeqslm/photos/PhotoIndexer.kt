@@ -49,6 +49,13 @@ class PhotoIndexer(private val context: Context) {
     }
     
     /**
+     * Get current scan folder path
+     */
+    fun getScanFolderPath(): String {
+        return scanFolder?.absolutePath ?: getDefaultFolder()
+    }
+    
+    /**
      * Clear all indexed photos from database
      */
     fun clearDatabase() {
@@ -57,11 +64,13 @@ class PhotoIndexer(private val context: Context) {
     }
     
     /**
-     * Get default test folder path - use Screenshots folder
+     * Get default test folder path - try user's test folder first, then Screenshots
      */
     fun getDefaultFolder(): String {
-        // Try common screenshot locations
+        // Try user's test folder first, then common screenshot locations
         val paths = listOf(
+            "/sdcard/DCIM/for_edgeQ_testing",  // User's test folder
+            "/storage/emulated/0/DCIM/for_edgeQ_testing",
             "/sdcard/Pictures/Screenshots",
             "/sdcard/DCIM/Screenshots", 
             "/storage/emulated/0/Pictures/Screenshots",
@@ -150,18 +159,33 @@ class PhotoIndexer(private val context: Context) {
                 }
                 
                 // Index the photo
+                val startTime = System.currentTimeMillis()
                 indexPhoto(photo)
+                val latency = System.currentTimeMillis() - startTime
                 indexed++
                 
                 emit(IndexingProgress(
                     current = indexed + skipped,
                     total = total,
-                    message = "Indexed: $indexed, Skipped: $skipped"
+                    message = "Indexed: $indexed, Skipped: $skipped",
+                    currentFile = photo.name,
+                    latencyMs = latency,
+                    imageSize = photo.size,
+                    success = true
                 ))
                 
             } catch (e: Exception) {
                 android.util.Log.e("PhotoIndexer", "Failed to index ${photo.path}: ${e.message}")
                 failed++
+                emit(IndexingProgress(
+                    current = indexed + skipped + failed, // Update progress even on failure
+                    total = total,
+                    message = "Failed: ${photo.name}",
+                    currentFile = photo.name,
+                    latencyMs = 0,
+                    imageSize = photo.size,
+                    success = false
+                ))
             }
         }
         
@@ -267,6 +291,11 @@ class PhotoIndexer(private val context: Context) {
         )
     }
     
+    /**
+     * Get vector store for direct access (VLM indexing)
+     */
+    fun getVectorStore(): PhotoVectorStore = vectorStore
+    
     fun close() {
         imageEncoder?.close()
         textEncoder?.close()
@@ -293,7 +322,11 @@ data class IndexingProgress(
     val current: Int,
     val total: Int,
     val message: String,
-    val isComplete: Boolean = false
+    val isComplete: Boolean = false,
+    val currentFile: String = "",
+    val latencyMs: Long = 0,
+    val imageSize: Long = 0,
+    val success: Boolean = true
 ) {
     val progress: Float get() = if (total > 0) current.toFloat() / total else 0f
 }

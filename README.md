@@ -1,204 +1,226 @@
-# EdgeQ-SLM: On-Device SLM Inference
+# EdgeQ-SLM: On-Device Small Language Model Inference
 
-**EdgeQ-SLM** is a Proof of Concept (PoC) application demonstrating efficient quantization and low-latency inference of Small Language Models (SLMs) on mobile devices using **Kotlin Multiplatform** and **llama.cpp**.
+**EdgeQ-SLM** is a Proof of Concept (PoC) mobile application demonstrating efficient quantization and low-latency inference of Small Language Models (SLMs) on Android devices using **Kotlin Multiplatform** and **llama.cpp**.
 
-This project serves as the implementation part of the thesis: *"Efficient Quantization and Low-Latency Inference of Small Language Models on Mobile Devices"*.
+This project serves as the implementation component for the Master's thesis:
 
-## 🚀 Features
+> **"Efficient Quantization and Low-Latency Inference of Small Language Models on Mobile Devices"**
+>
+> Hasan Aksoy (140130)  
+> MSc Advanced Analytics – Big Data  
+> SGH Warsaw School of Economics  
+> ha140130@student.sgh.waw.pl
 
-- **On-Device Inference:** Runs quantized GGUF models (e.g., Qwen 1.5 1.8B) entirely offline.
-- **In-App Model Download:** Download models directly from HuggingFace with progress tracking.
-- **Performance Metrics:** Real-time dashboard displaying:
-  - **TTFT (Time To First Token):** Prefill latency.
-  - **Decode Speed:** Tokens per second generation rate.
-  - **Memory Usage:** Peak RAM consumption.
-- **Benchmark & Results:** Complete experiment runner for thesis proof-of-work:
-  - Run experiments with configurable temperature sweep
-  - Automated metrics collection (latency, memory, CPU)
-  - Export results to CSV/JSON
-  - Visualize results with charts
-- **Cross-Platform Architecture:** Built with Kotlin Multiplatform (KMP) and Jetpack Compose.
-- **Advanced JNI Integration:** Custom C++ bridge to `llama.cpp` supporting:
-  - ChatML templates
-  - Stop token detection
-  - Configurable sampling (Temperature, Top-P, Repeat Penalty)
-- **Quantization Support:** Optimized for INT8 (Q8_0) and INT4 quantization schemes.
+---
 
-## 🛠️ Architecture
+## Features
 
-- **UI Layer:** Compose Multiplatform (Android/iOS*)
-- **Business Logic:** Kotlin Shared Module (ViewModel, State Management)
-- **Model Management:** ModelRepository with expect/actual pattern
-- **Native Bridge:** JNI (Java Native Interface) implementation
-- **Inference Engine:** `llama.cpp` (C++) cross-compiled using CMake
-- **Benchmark Framework:** Measurement module with structured logging
+- **On-Device LLM Inference:** Runs quantized GGUF models (Qwen 1.5 1.8B) entirely offline using llama.cpp.
+- **Photo Search:** Hybrid OCR + CLIP visual search for on-device photo retrieval.
+- **Benchmark Framework:** Systematic performance measurement with configurable experiments.
+- **Performance Metrics:** Real-time display of TTFT, tokens/sec, memory, and CPU usage.
+- **Export & Analysis:** CSV/JSON export for statistical analysis in Python or Julia.
 
-## 📋 Prerequisites
+---
 
-- **IDE:** Android Studio Iguana or newer
-- **JDK:** Java 17 (Required by AGP 8.0+)
-- **NDK:** Version 26.1.x
-- **CMake:** 3.22.1+
-- **Python:** 3.x (for model conversion scripts)
-- **llama.cpp:** Cloned locally (path configured in `local.properties`)
+## Benchmark Analysis & Documentation
 
-## 📥 Setup & Build
-
-### 1. Clone the Repository
-```bash
-git clone https://github.com/aksoyh/EdgeQ-SLM.git
-cd EdgeQ-SLM
-```
-
-### 2. Configure llama.cpp Path
-Add to `local.properties`:
-```properties
-LLAMA_CPP_PATH=/path/to/your/llama.cpp
-```
-Or set environment variable:
-```bash
-export LLAMA_CPP_PATH=/path/to/your/llama.cpp
-```
-
-### 3. Build and Run
-```bash
-./gradlew composeApp:assembleDebug
-adb install composeApp/build/outputs/apk/debug/composeApp-debug.apk
-```
-
-Or open the project in Android Studio and run the `composeApp` configuration.
-
-### 4. Download Model
-
-**Option A: In-App Download**
-1. Launch the app
-2. Check the "🔧 Debug: Force 'No Model'" checkbox to show download button
-3. Tap "☁️ Download" to download from HuggingFace
-4. Progress bar shows download speed and completion percentage
-
-**Option B: Manual via ADB**
-```bash
-# Create directory
-adb shell mkdir -p /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
-
-# Push model
-adb push qwen-q8_0.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
-```
-
-### 5. Prepare Your Own Model (Optional)
-If you want to quantize a model yourself:
-
-1. **Download Model:**
-   ```bash
-   pip3 install huggingface_hub
-   huggingface-cli download Qwen/Qwen1.5-1.8B --local-dir models/Qwen1.5-1.8B
-   ```
-
-2. **Convert & Quantize (using llama.cpp tools):**
-   ```bash
-   cd $LLAMA_CPP_PATH
-   python3 convert_hf_to_gguf.py /path/to/models/Qwen1.5-1.8B --outfile qwen-f16.gguf
-   cmake -B build && cmake --build build --config Release
-   ./build/bin/llama-quantize qwen-f16.gguf qwen-q8_0.gguf Q8_0
-   ```
-
-## 📱 Usage
-
-### Basic Inference
-1. **Launch App** - The app will check for available models
-2. **Select Model** - Use the dropdown to choose from available `.gguf` files
-3. **Load Model** - Tap "📦 Load Model" to initialize the inference engine
-4. **Generate** - Enter a prompt and tap "⚡ Generate"
-5. **View Metrics** - Real-time performance metrics are displayed below
-
-### Running Benchmarks
-1. Navigate to the **📊 Benchmark** tab
-2. Review the default configuration (temperatures, repeats)
-3. Ensure model is loaded on the LLM tab first
-4. Tap **"Full Benchmark"** for complete experiment (18 prompts × 7 temps × 5 repeats)
-5. Or tap **"⚡ Quick Test"** for a fast 3-prompt test
-6. Monitor progress in real-time
-7. When complete, tap **"📁 Export CSV/JSON"** to save results
-8. Tap **"📤 Share"** to send files via email/drive
-
-### Exported Files
-Results are saved to `/data/data/com.aksoyapps.edgeqslm/files/results/`:
-- `latency_memory_cpu_[timestamp].csv` - Raw metrics
-- `aggregated_stats_[timestamp].csv` - Statistical summaries
-- `sanity_checks_[timestamp].csv` - Output quality checks
-- `sample_outputs_[timestamp].json` - Example outputs
-- `run_metadata_[timestamp].json` - Experiment configuration
-- `device_info_[timestamp].txt` - Device specifications
-
-## 📊 Benchmark Framework
-
-### Metrics Collected
-| Metric | Unit | Method |
-|--------|------|--------|
-| E2E Latency | ms | System clock |
-| TTFT (Prefill) | ms | llama.cpp native |
-| Decode Time | ms | llama.cpp native |
-| Tokens/sec | tok/s | Calculated |
-| Peak Memory | MB | Debug.MemoryInfo (PSS) |
-| CPU Utilization | % | /proc/stat |
-
-### Temperature Sweep
-Default: `[0.1, 0.3, 0.7, 1.0, 1.3, 1.7, 2.0]`
-
-### Prompt Categories
-- Factual Q&A (5 prompts)
-- Instruction Following (5 prompts)
-- Creative Writing (5 prompts)
-- Edge Cases (3 prompts)
-
-### Output Quality Checks (RQ2)
-- Empty output detection
-- Repetition score (3-gram analysis)
-- Coherence validation
-
-## 📚 Documentation
+The `/report/` directory contains the complete analysis of benchmark results. The Julia notebook is preferred for academic presentation.
 
 | Document | Description |
 |----------|-------------|
-| [GUIDELINE.md](GUIDELINE.md) | Measurement and logging guidelines |
-| [docs/EXPERIMENT_PROTOCOL.md](docs/EXPERIMENT_PROTOCOL.md) | Academic experiment methodology |
-| [docs/PROOF_OF_WORK_TEMPLATE.md](docs/PROOF_OF_WORK_TEMPLATE.md) | Thesis report template |
-| [docs/NOTES_TR.md](docs/NOTES_TR.md) | Turkish notes with English terms |
-| [docs/PROGRESS_REPORT.md](docs/PROGRESS_REPORT.md) | Development log |
-| [docs/README_FOR_SUPERVISOR.md](docs/README_FOR_SUPERVISOR.md) | Supervisor overview |
+| [EdgeQ_SLM_ProofOfWork_Report.docx](report/EdgeQ_SLM_ProofOfWork_Report.docx) | Main thesis proof-of-work report with methodology, results, and discussion. |
+| [EdgeQ_SLM_Analysis_Julia.ipynb](report/EdgeQ_SLM_Analysis_Julia.ipynb) | **Recommended.** Julia Jupyter notebook with statistical analysis and visualizations. |
+| [EdgeQ_SLM_Analysis_Julia.html](report/EdgeQ_SLM_Analysis_Julia.html) | Static HTML export of the Julia notebook for viewing without Jupyter. |
+| [EdgeQ_SLM_Analysis.ipynb](report/EdgeQ_SLM_Analysis.ipynb) | Python (Pandas/Matplotlib) notebook with similar analysis. |
+| [EdgeQ_SLM_Analysis.html](report/EdgeQ_SLM_Analysis.html) | Static HTML export of the Python notebook. |
 
-## 🗂️ Key Files
+### What Each File Contains
 
-| File | Description |
-|------|-------------|
-| `shared/.../benchmark/BenchmarkRunner.kt` | Experiment orchestrator |
-| `shared/.../benchmark/BenchmarkModels.kt` | Data classes for results |
-| `shared/.../benchmark/PromptSet.kt` | Fixed prompt set (18 prompts) |
-| `shared/.../benchmark/SanityChecker.kt` | Output quality validation |
-| `composeApp/.../benchmark/BenchmarkScreen.kt` | Benchmark UI with charts |
-| `shared/.../LlmEngine.kt` | Cross-platform inference interface |
-| `shared/.../AndroidLlamaCppEngine.kt` | Android llama.cpp implementation |
-| `shared/src/androidMain/cpp/llama_jni.cpp` | JNI bridge to llama.cpp |
+**EdgeQ_SLM_ProofOfWork_Report.docx**
+- Executive summary of findings
+- System architecture description
+- Experimental methodology
+- Key performance results and tables
+- Discussion of limitations and future work
 
-## 🔧 Troubleshooting
+**EdgeQ_SLM_Analysis_Julia.ipynb** (Recommended)
+- Data loading and preprocessing
+- Latency distribution analysis (histograms, box plots)
+- Temperature effect on performance
+- Memory consumption trends
+- Statistical summaries (mean, std, percentiles)
+- Publication-ready figures
 
-| Issue | Solution |
-|-------|----------|
-| "Model not found" | Use ADB push to copy model to app's files directory |
-| "Download failed" | Check internet connection, try again |
-| "Load failed" | Ensure model file is valid GGUF format |
-| Permission errors | Model must be in `/sdcard/Android/data/com.aksoyapps.edgeqslm/files/` |
-| Build fails with LLAMA_CPP_PATH | Set path in `local.properties` or as environment variable |
-| Benchmark crashes | Ensure model is loaded before starting benchmark |
+**EdgeQ_SLM_Analysis.ipynb** (Python Alternative)
+- Same analysis as Julia version using Pandas/Matplotlib
+- Useful if Julia environment is not available
 
-## 🔮 Future Work
+### When to Use Which
 
-- [ ] INT4 quantization comparison
-- [ ] Unquantized baseline (FP16)
-- [ ] iOS implementation
-- [ ] NPU acceleration
-- [ ] Full LLM evaluation benchmarks
+| Use Case | Recommended File |
+|----------|------------------|
+| Reading final results and methodology | `EdgeQ_SLM_ProofOfWork_Report.docx` |
+| Reproducing statistical analysis | `EdgeQ_SLM_Analysis_Julia.ipynb` |
+| Viewing analysis without running code | `EdgeQ_SLM_Analysis_Julia.html` |
+| Python-based analysis workflow | `EdgeQ_SLM_Analysis.ipynb` |
 
-## ⚖️ License
+---
+
+## Project Structure
+
+```
+EdgeQ-SLM/
+├── report/                           # Analysis & report files
+│   ├── EdgeQ_SLM_ProofOfWork_Report.docx
+│   ├── EdgeQ_SLM_Analysis_Julia.ipynb
+│   ├── EdgeQ_SLM_Analysis_Julia.html
+│   ├── EdgeQ_SLM_Analysis.ipynb
+│   └── EdgeQ_SLM_Analysis.html
+├── collected_data/                   # Raw benchmark data
+│   ├── full_benchmark/               # SLM benchmark CSVs
+│   ├── indexing_sessions.csv         # Photo indexing logs
+│   └── indexing_item_details.csv     # Per-photo metrics
+├── docs/                             # Technical documentation
+│   ├── README_FOR_SUPERVISOR.md      # Project overview
+│   ├── EXPERIMENT_PROTOCOL.md        # Methodology
+│   └── PROOF_OF_WORK_TEMPLATE.md     # Report structure
+├── screenshots_of_the_app/           # Application screenshots
+│   ├── *.jpg                         # General UI screenshots
+│   └── benchmark_results/            # Benchmark screen screenshots
+├── shared/                           # Kotlin shared module
+│   ├── src/commonMain/kotlin/        # Cross-platform interfaces
+│   └── src/androidMain/              # Android implementations + JNI
+├── composeApp/                       # Android UI (Compose)
+└── README.md                         # This file
+```
+
+---
+
+## Technical Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/README_FOR_SUPERVISOR.md](docs/README_FOR_SUPERVISOR.md) | High-level project overview for academic review. |
+| [docs/EXPERIMENT_PROTOCOL.md](docs/EXPERIMENT_PROTOCOL.md) | Detailed experimental methodology and metrics definitions. |
+| [docs/PROOF_OF_WORK_TEMPLATE.md](docs/PROOF_OF_WORK_TEMPLATE.md) | Template for the final proof-of-work report. |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Android Studio Iguana or newer
+- JDK 17
+- NDK 26.1.x
+- ARM64 Android device (physical)
+
+### Build & Install
+
+```bash
+# Clone
+git clone https://github.com/aksoyh/edgeq-slm.git
+cd EdgeQ-SLM
+
+# Build
+./gradlew composeApp:assembleDebug
+
+# Install
+adb install composeApp/build/outputs/apk/debug/composeApp-debug.apk
+```
+
+### Model Deployment
+
+```bash
+# LLM Model (~1.8 GB) - download in-app or push manually
+adb push qwen-q8_0.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
+
+# CLIP Models (~660 MB) for visual search
+adb push clip-vit-b32-image.onnx /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
+adb push clip-vit-b32-text.onnx /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
+```
+
+---
+
+## Running Benchmarks
+
+1. Launch the app and load the model on the **LLM** tab.
+2. Navigate to the **Benchmark** tab.
+3. Tap **Full Benchmark** to run the complete experiment suite.
+4. Results are automatically exported to CSV/JSON upon completion.
+5. Pull data to your computer:
+
+```bash
+adb pull /sdcard/Android/data/com.aksoyapps.edgeqslm/files/results/ ./collected_data/
+```
+
+---
+
+## Benchmark Configuration
+
+Default configuration (optimized for thesis timeline):
+
+| Parameter | Value |
+|-----------|-------|
+| Temperatures | 0.1, 1.1, 2.0 |
+| Max Tokens | 128, 512, 1024 |
+| Repeats | 3 per condition |
+| Total Runs | ~270 (10 prompts × 3 temps × 3 tokens × 3 repeats) |
+| Estimated Time | ~45-60 minutes |
+
+---
+
+## Key Metrics Collected
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| E2E Latency | ms | Total inference time |
+| TTFT | ms | Time to first token (prefill) |
+| Tokens/sec | t/s | Generation speed |
+| Peak Memory | MB | Maximum RAM usage (PSS) |
+| CPU Utilization | % | Process CPU usage |
+| Repetition Score | 0-1 | Output quality indicator |
+
+---
+
+## Application Screenshots
+
+The `/screenshots_of_the_app/` directory contains screenshots demonstrating:
+
+- **General UI:** LLM chat interface, photo search, resource monitoring
+- **Benchmark Results:** In-app charts showing latency and token speed distributions
+
+---
+
+## Known Limitations
+
+1. **Single Device Testing:** Results are device-specific.
+2. **Quantized Models Only:** No unquantized baseline due to memory constraints.
+3. **Process CPU Only:** Android restrictions prevent system-wide CPU measurement.
+4. **Sanity Checks ≠ Full Benchmarks:** Output quality is approximated, not formally evaluated.
+
+---
+
+## Future Work
+
+- INT4 quantization comparison
+- Multi-device benchmark study
+- NPU acceleration testing
+- iOS implementation
+
+---
+
+## License
 
 MIT License
+
+---
+
+---
+
+**Author:** Hasan Aksoy (140130)  
+**Institution:** SGH Warsaw School of Economics  
+**Contact:** ha140130@student.sgh.waw.pl | aksoy.android@gmail.com  
+**Repository:** [github.com/aksoyh/edgeq-slm](https://github.com/aksoyh/edgeq-slm)  
+**Date:** January 2026

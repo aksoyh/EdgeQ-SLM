@@ -1,9 +1,12 @@
-# Proof of Work Report Template
+# Proof of Work Report
 
 **Thesis Title:** Efficient Quantization and Low-Latency Inference of Small Language Models on Mobile Devices  
-**Candidate:** [Your Name]  
-**Supervisor:** [Supervisor Name]  
-**Date:** [Date]
+**Candidate:** Hasan Aksoy (140130)  
+**Program:** MSc Advanced Analytics – Big Data  
+**Course:** Master Thesis (Winter Semester 2025/2026)  
+**Institution:** SGH Warsaw School of Economics  
+**Supervisor:** dr Bartosz Pankratz  
+**Date:** January 2026
 
 ---
 

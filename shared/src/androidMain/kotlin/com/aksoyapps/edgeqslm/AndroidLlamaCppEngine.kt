@@ -52,6 +52,18 @@ class AndroidLlamaCppEngine : LlmEngine {
     private external fun getDecodeTimeNative(): Long
     private external fun getTokensGeneratedNative(): Int
     private external fun isModelLoadedNative(): Boolean
+    
+    // Vision model native methods
+    private external fun loadVisionProjectorNative(projectorPath: String): Boolean
+    private external fun isVisionModelLoadedNative(): Boolean
+    private external fun analyzeImageNative(
+        imageData: ByteArray,
+        width: Int,
+        height: Int,
+        prompt: String,
+        maxTokens: Int,
+        temperature: Float
+    ): String
 
     override suspend fun loadModel(modelPath: String): Boolean = withContext(Dispatchers.IO) {
         println("$TAG: Loading model from $modelPath")
@@ -141,5 +153,103 @@ class AndroidLlamaCppEngine : LlmEngine {
         } catch (e: Exception) {
             isLoaded
         }
+    }
+    
+    // ============= VISION MODEL SUPPORT =============
+    
+    private var isVisionProjectorLoaded = false
+    
+    /**
+     * Load the vision projector (mmproj file) for Vision LLM support
+     * The base model must be loaded first via loadModel()
+     */
+    suspend fun loadVisionProjector(projectorPath: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isLoaded) {
+            println("$TAG: Cannot load vision projector - base model not loaded")
+            return@withContext false
+        }
+        
+        println("$TAG: Loading vision projector from $projectorPath")
+        
+        val loadTime = measureTimeMillis {
+            isVisionProjectorLoaded = loadVisionProjectorNative(projectorPath)
+        }
+        
+        if (isVisionProjectorLoaded) {
+            println("$TAG: Vision projector loaded in ${loadTime}ms")
+        } else {
+            println("$TAG: Failed to load vision projector")
+        }
+        
+        isVisionProjectorLoaded
+    }
+    
+    /**
+     * Check if vision model (base + projector) is loaded
+     */
+    fun isVisionLoaded(): Boolean {
+        return try {
+            isVisionModelLoadedNative()
+        } catch (e: Exception) {
+            isVisionProjectorLoaded
+        }
+    }
+    
+    /**
+     * Analyze an image with the Vision LLM
+     * @param imageData RGB byte array (3 bytes per pixel, RGBRGBRGB format)
+     * @param width Image width in pixels
+     * @param height Image height in pixels
+     * @param prompt Text prompt for image analysis
+     * @param maxTokens Maximum tokens to generate
+     * @param temperature Sampling temperature
+     * @return Analysis result with generated text and timing
+     */
+    suspend fun analyzeImage(
+        imageData: ByteArray,
+        width: Int,
+        height: Int,
+        prompt: String,
+        maxTokens: Int = 256,
+        temperature: Float = 0.7f
+    ): GenerationResult = withContext(Dispatchers.IO) {
+        if (!isVisionLoaded()) {
+            throw IllegalStateException("Vision model not loaded. Load base model and vision projector first.")
+        }
+        
+        println("$TAG: Analyzing image ${width}x${height}, prompt='${prompt.take(50)}...', maxTokens=$maxTokens")
+        
+        val memoryBefore = Debug.getNativeHeapAllocatedSize()
+        
+        var generatedText: String
+        val totalLatency = measureTimeMillis {
+            generatedText = analyzeImageNative(imageData, width, height, prompt, maxTokens, temperature)
+        }
+        
+        val memoryAfter = Debug.getNativeHeapAllocatedSize()
+        val peakMemory = maxOf(memoryBefore, memoryAfter)
+        
+        // Get timing from native side
+        val prefillTime = getPrefillTimeNative()
+        val decodeTime = getDecodeTimeNative()
+        val tokensGenerated = getTokensGeneratedNative()
+        
+        val tokensPerSec = if (decodeTime > 0) {
+            (tokensGenerated * 1000f) / decodeTime
+        } else {
+            0f
+        }
+        
+        println("$TAG: Vision analysis complete - TTFT: ${prefillTime}ms, Decode: ${decodeTime}ms, Tokens: $tokensGenerated, Speed: ${String.format("%.2f", tokensPerSec)} tok/s")
+        
+        GenerationResult(
+            text = generatedText,
+            latencyMs = totalLatency,
+            tokensPerSecond = tokensPerSec,
+            memoryUsageBytes = peakMemory,
+            prefillTimeMs = prefillTime,
+            decodeTimeMs = decodeTime,
+            tokensGenerated = tokensGenerated
+        )
     }
 }

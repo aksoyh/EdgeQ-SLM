@@ -26,10 +26,19 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.aksoyapps.edgeqslm.photos.PhotoSearchScreen
 import com.aksoyapps.edgeqslm.photos.PhotoSearchViewModel
+import com.aksoyapps.edgeqslm.photos.IndexingType
 import com.aksoyapps.edgeqslm.benchmark.BenchmarkScreen
 import com.aksoyapps.edgeqslm.benchmark.BenchmarkViewModel
 import com.aksoyapps.edgeqslm.benchmark.AndroidExportService
 import com.aksoyapps.edgeqslm.benchmark.createSystemMetricsProvider
+import android.content.ComponentName
+import android.content.ServiceConnection
+import android.os.IBinder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -37,11 +46,47 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val PERMISSION_REQUEST_CODE = 1001
         private const val DEFAULT_MODEL_PATH = "/sdcard/Android/data/com.aksoyapps.edgeqslm/files/qwen-q8_0.gguf"
+        // VLM model must match the vision projector
+        private const val VLM_MODEL_FILENAME = "Qwen2.5-VL-3B-Instruct-q4_k_m.gguf"
     }
     
     private lateinit var llmViewModel: LlmViewModel
     private lateinit var photoSearchViewModel: PhotoSearchViewModel
     private lateinit var benchmarkViewModel: BenchmarkViewModel
+    private lateinit var engine: AndroidLlamaCppEngine
+    
+    // Indexing Service
+    private var indexingService: IndexingService? = null
+    private var serviceBound = false
+    
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as IndexingService.IndexingBinder
+            indexingService = binder.getService()
+            serviceBound = true
+            
+            // Pass indexers to service
+            indexingService?.setIndexers(
+                photoSearchViewModel.getPhotoIndexer(),
+                photoSearchViewModel.getVlmIndexer()
+            )
+            
+            // Observe service state and update ViewModel
+            MainScope().launch {
+                indexingService?.indexingState?.collect { state ->
+                    photoSearchViewModel.updateFromServiceState(state)
+                }
+            }
+            
+            android.util.Log.i("MainActivity", "IndexingService connected")
+        }
+        
+        override fun onServiceDisconnected(name: ComponentName?) {
+            indexingService = null
+            serviceBound = false
+            android.util.Log.i("MainActivity", "IndexingService disconnected")
+        }
+    }
     
     // Folder picker launcher
     private val folderPickerLauncher = registerForActivityResult(
@@ -53,10 +98,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        checkAndRequestPermissions()
+        // Request permissions immediately on start
+        requestPermissionsOnStart()
         
         // Initialize LLM
-        val engine = AndroidLlamaCppEngine()
+        engine = AndroidLlamaCppEngine()
         val repository = ModelRepository()
         repository.init(this)
         val modelPath = findModelPath()
@@ -75,16 +121,139 @@ class MainActivity : ComponentActivity() {
             modelPath = modelPath
         )
         
-        // Initialize Photo Search
+        // Initialize Photo Search with VLM support
         photoSearchViewModel = PhotoSearchViewModel(this)
+        
+        // Try to load VLM projector if available
+        tryLoadVisionProjector()
 
         setContent { 
             MainAppWithTabs(
                 llmViewModel = llmViewModel,
                 photoSearchViewModel = photoSearchViewModel,
                 benchmarkViewModel = benchmarkViewModel,
-                onSelectFolder = { openFolderPicker() }
+                onSelectFolder = { openFolderPicker() },
+                // Use MainActivity methods to trigger Service
+                onStartIndexing = { startBackgroundIndexing(IndexingType.ML) },
+                onStartVlmIndexing = { startBackgroundIndexing(IndexingType.VLM) },
+                onForceVlmIndex = { startBackgroundIndexing(IndexingType.VLM, force = true) },
+                onStopIndexing = { stopBackgroundIndexing() }
             )
+        }
+    }
+    
+    override fun onStart() {
+        super.onStart()
+        // Bind to IndexingService
+        Intent(this, IndexingService::class.java).also { intent ->
+            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        }
+    }
+    
+    override fun onStop() {
+        super.onStop()
+        // Unbind from service (service continues running if indexing)
+        if (serviceBound) {
+            unbindService(serviceConnection)
+            serviceBound = false
+        }
+    }
+    
+    /**
+     * Start background indexing via foreground service
+     */
+    fun startBackgroundIndexing(type: IndexingType, folderPath: String? = null, force: Boolean = false) {
+        val action = when (type) {
+            IndexingType.ML -> IndexingService.ACTION_START_ML_INDEXING
+            IndexingType.VLM -> IndexingService.ACTION_START_VLM_INDEXING
+            else -> return
+        }
+        
+        // If folder path is null, use current from ViewModel
+        val path = folderPath ?: photoSearchViewModel.uiState.value.scanFolderPath
+        
+        val intent = Intent(this, IndexingService::class.java).apply {
+            this.action = action
+            putExtra(IndexingService.EXTRA_FOLDER_PATH, path)
+            putExtra(IndexingService.EXTRA_FORCE_INDEX, force)
+        }
+        
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+    
+    fun stopBackgroundIndexing() {
+         val intent = Intent(this, IndexingService::class.java).apply {
+            action = IndexingService.ACTION_STOP_INDEXING
+        }
+        startService(intent)
+    }
+    
+    /**
+     * Try to load VLM (Vision Language Model) support
+     * Creates a SEPARATE engine for VLM with matching model+projector
+     */
+    private fun tryLoadVisionProjector() {
+        MainScope().launch(Dispatchers.IO) {
+            try {
+                val filesDir = getExternalFilesDir(null) ?: return@launch
+                
+                // Find VL model (must match the projector)
+                val vlmModelFile = File(filesDir, VLM_MODEL_FILENAME)
+                if (!vlmModelFile.exists()) {
+                    android.util.Log.w("MainActivity", "VLM model not found: ${vlmModelFile.absolutePath}")
+                    android.util.Log.w("MainActivity", "VLM support disabled - need $VLM_MODEL_FILENAME")
+                    return@launch
+                }
+                
+                // Find mmproj file
+                val mmprojFiles = filesDir.listFiles { file ->
+                    file.name.contains("mmproj", ignoreCase = true) && 
+                    file.name.endsWith(".gguf")
+                } ?: emptyArray()
+                
+                if (mmprojFiles.isEmpty()) {
+                    android.util.Log.w("MainActivity", "No vision projector found")
+                    return@launch
+                }
+                
+                val mmprojFile = mmprojFiles.first()
+                android.util.Log.i("MainActivity", "Found VLM model: ${vlmModelFile.name}")
+                android.util.Log.i("MainActivity", "Found vision projector: ${mmprojFile.name}")
+                
+                // Create SEPARATE engine for VLM
+                val vlmEngine = AndroidLlamaCppEngine()
+                
+                android.util.Log.i("MainActivity", "Loading VLM model (separate from chat model)...")
+                
+                // loadModel is a suspend fun, call it directly in coroutine
+                val loaded = vlmEngine.loadModel(vlmModelFile.absolutePath)
+                
+                if (loaded) {
+                    android.util.Log.i("MainActivity", "VLM base model loaded, loading vision projector...")
+                    val success = vlmEngine.loadVisionProjector(mmprojFile.absolutePath)
+                    if (success) {
+                        android.util.Log.i("MainActivity", "✅ VLM ready: ${vlmModelFile.name} + ${mmprojFile.name}")
+                        withContext(Dispatchers.Main) {
+                            photoSearchViewModel.setVlmAvailable(true, vlmEngine)
+                            // Re-send indexers to service now that VLM is ready
+                            indexingService?.setIndexers(
+                                photoSearchViewModel.getPhotoIndexer(),
+                                photoSearchViewModel.getVlmIndexer()
+                            )
+                        }
+                    } else {
+                        android.util.Log.e("MainActivity", "Failed to load vision projector")
+                    }
+                } else {
+                    android.util.Log.e("MainActivity", "Failed to load VLM model")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Error loading VLM: ${e.message}", e)
+            }
         }
     }
     
@@ -132,9 +301,36 @@ class MainActivity : ComponentActivity() {
         return DEFAULT_MODEL_PATH
     }
     
-    private fun checkAndRequestPermissions() {
+    private fun requestPermissionsOnStart() {
+        val permissionsToRequest = mutableListOf<String>()
+        
+        // Android 13+ (API 33)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.READ_MEDIA_IMAGES)
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } 
+        // Android 10-12
+        else {
+             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }
+        
+        // Request standard permissions
+        if (permissionsToRequest.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                permissionsToRequest.toTypedArray(),
+                PERMISSION_REQUEST_CODE
+            )
+        }
+        
+        // Android 11+ (API 30) - All Files Access
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ - need MANAGE_EXTERNAL_STORAGE for full file access
             if (!Environment.isExternalStorageManager()) {
                 try {
                     val intent = Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
@@ -144,29 +340,6 @@ class MainActivity : ComponentActivity() {
                     val intent = Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
                     startActivity(intent)
                 }
-            }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ - request media images permission
-            val readPermission = ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_MEDIA_IMAGES
-            )
-            if (readPermission != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.READ_MEDIA_IMAGES),
-                    PERMISSION_REQUEST_CODE
-                )
-            }
-        } else {
-            val readPermission = ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_EXTERNAL_STORAGE
-            )
-            if (readPermission != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE),
-                    PERMISSION_REQUEST_CODE
-                )
             }
         }
     }
@@ -199,7 +372,11 @@ fun MainAppWithTabs(
     llmViewModel: LlmViewModel,
     photoSearchViewModel: PhotoSearchViewModel,
     benchmarkViewModel: BenchmarkViewModel,
-    onSelectFolder: () -> Unit
+    onSelectFolder: () -> Unit,
+    onStartIndexing: () -> Unit,
+    onStartVlmIndexing: () -> Unit,
+    onForceVlmIndex: () -> Unit,
+    onStopIndexing: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
     
@@ -270,13 +447,17 @@ fun MainAppWithTabs(
                             uiState = photoUiState,
                             onQueryChange = { photoSearchViewModel.updateQueryAndSearch(it) },
                             onSearch = { photoSearchViewModel.search() },
-                            onStartIndexing = { photoSearchViewModel.startIndexing() },
+                            onStartIndexing = onStartIndexing,
                             onForceIndexing = { photoSearchViewModel.forceIndex() },
+                            onVlmIndex = onStartVlmIndexing,
+                            onForceVlmIndex = onForceVlmIndex,
+                            onCancelVlmIndex = onStopIndexing,
                             onRefresh = { photoSearchViewModel.refreshPhotoList() },
                             onTabChange = { photoSearchViewModel.selectTab(it) },
                             onPhotoClick = { _ -> },
                             onClearError = { photoSearchViewModel.clearError() },
-                            onSelectFolder = onSelectFolder
+                            onSelectFolder = onSelectFolder,
+                            onSearchModeChange = { photoSearchViewModel.setSearchMode(it) }
                         )
                     }
                 }

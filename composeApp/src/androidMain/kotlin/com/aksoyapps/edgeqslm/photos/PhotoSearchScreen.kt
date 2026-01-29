@@ -45,11 +45,15 @@ fun PhotoSearchScreen(
     onSearch: () -> Unit,
     onStartIndexing: () -> Unit,
     onForceIndexing: () -> Unit,
+    onVlmIndex: () -> Unit,
+    onForceVlmIndex: () -> Unit,
+    onCancelVlmIndex: () -> Unit,
     onRefresh: () -> Unit,
     onTabChange: (Int) -> Unit,
     onPhotoClick: (String) -> Unit,
     onClearError: () -> Unit,
     onSelectFolder: () -> Unit,
+    onSearchModeChange: (SearchMode) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var selectedPhoto by remember { mutableStateOf<PhotoSearchResultUi?>(null) }
@@ -70,7 +74,7 @@ fun PhotoSearchScreen(
             modifier = Modifier.padding(bottom = 8.dp)
         )
         
-        StatusCard(uiState, onStartIndexing, onForceIndexing, onRefresh, onSelectFolder)
+        StatusCard(uiState, onStartIndexing, onForceIndexing, onVlmIndex, onForceVlmIndex, onCancelVlmIndex, onRefresh, onSelectFolder, onSearchModeChange)
         
         Spacer(modifier = Modifier.height(12.dp))
         
@@ -191,7 +195,7 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                 
                 Spacer(modifier = Modifier.height(12.dp))
                 
-                Text("📝 Detected Text (OCR)", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF58A6FF))
+                Text("ℹ️ Photo Info", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF58A6FF))
                 
                 Spacer(modifier = Modifier.height(6.dp))
                 
@@ -200,12 +204,53 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                     shape = RoundedCornerShape(8.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22))
                 ) {
-                    Box(modifier = Modifier.fillMaxSize().padding(12.dp).verticalScroll(rememberScrollState())) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        // VLM Description
+                        Text("🧠 VLM Description", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF8B5CF6))
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val vlmDesc = photo.vlmDescription
+                        if (vlmDesc.isNullOrBlank()) {
+                            Text("Not indexed with VLM", fontSize = 13.sp, color = Color(0xFF6E7681))
+                        } else {
+                            Text(vlmDesc, fontSize = 13.sp, color = Color.White, lineHeight = 18.sp)
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // VLM Tags
+                        Text("🏷️ VLM Tags", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF8B5CF6))
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val vlmTags = photo.vlmTags
+                        if (vlmTags.isNullOrBlank()) {
+                            Text("No tags", fontSize = 13.sp, color = Color(0xFF6E7681))
+                        } else {
+                            Text(vlmTags, fontSize = 13.sp, color = Color(0xFFE879F9), lineHeight = 18.sp)
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // OCR Text
+                        Text("📝 OCR Text", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF58A6FF))
+                        Spacer(modifier = Modifier.height(4.dp))
                         val ocrText = photo.ocrText
                         if (ocrText.isNullOrBlank()) {
-                            Text("No text detected", fontSize = 14.sp, color = Color(0xFF6E7681))
+                            Text("No text detected", fontSize = 13.sp, color = Color(0xFF6E7681))
                         } else {
-                            Text(ocrText, fontSize = 14.sp, color = Color.White, lineHeight = 20.sp)
+                            Text(ocrText, fontSize = 13.sp, color = Color.White, lineHeight = 18.sp)
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // Match Reason
+                        if (photo.matchReason.isNotBlank()) {
+                            Text("🎯 Match Reason", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF238636))
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(photo.matchReason, fontSize = 13.sp, color = Color(0xFF7EE787), lineHeight = 18.sp)
                         }
                     }
                 }
@@ -302,8 +347,12 @@ private fun StatusCard(
     uiState: PhotoSearchUiState,
     onStartIndexing: () -> Unit,
     onForceIndexing: () -> Unit,
+    onVlmIndex: () -> Unit,
+    onForceVlmIndex: () -> Unit,
+    onCancelVlmIndex: () -> Unit,
     onRefresh: () -> Unit,
-    onSelectFolder: () -> Unit
+    onSelectFolder: () -> Unit,
+    onSearchModeChange: (SearchMode) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -322,6 +371,62 @@ private fun StatusCard(
                 )
                 TextButton(onClick = onSelectFolder, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
                     Text("📁 Select", fontSize = 11.sp, color = Color(0xFF58A6FF))
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(6.dp))
+            
+            // Search Mode Toggle
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Mode:", fontSize = 12.sp, color = Color(0xFF8B949E))
+                
+                // ML Mode Button
+                val isMlMode = uiState.searchMode == SearchMode.ML_BASED
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isMlMode) Color(0xFF58A6FF) else Color(0xFF30363D))
+                        .clickable { onSearchModeChange(SearchMode.ML_BASED) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        "🔬 ML (CLIP+OCR)",
+                        fontSize = 11.sp,
+                        color = if (isMlMode) Color.White else Color(0xFF8B949E),
+                        fontWeight = if (isMlMode) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+                
+                // VLM Mode Button
+                val isVlmMode = uiState.searchMode == SearchMode.VLM_BASED
+                val vlmEnabled = uiState.isVlmAvailable
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            when {
+                                isVlmMode -> Color(0xFF8957E5)  // Purple for Vision LLM
+                                vlmEnabled -> Color(0xFF30363D)
+                                else -> Color(0xFF21262D)  // Dimmed when unavailable
+                            }
+                        )
+                        .clickable(enabled = vlmEnabled) { onSearchModeChange(SearchMode.VLM_BASED) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        "🧠 VLM" + if (!vlmEnabled) " ⚠️" else "",
+                        fontSize = 11.sp,
+                        color = when {
+                            isVlmMode -> Color.White
+                            vlmEnabled -> Color(0xFF8B949E)
+                            else -> Color(0xFF6E7681)  // Dimmed
+                        },
+                        fontWeight = if (isVlmMode) FontWeight.Bold else FontWeight.Normal
+                    )
                 }
             }
             
@@ -373,6 +478,57 @@ private fun StatusCard(
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF58A6FF))
                     ) {
                         Text("🔃 Refresh", fontSize = 12.sp)
+                    }
+                }
+                
+                // VLM Indexing section
+                if (uiState.isVlmAvailable) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // VLM Index Progress
+                    if (uiState.isVlmIndexing) {
+                        Column {
+                            LinearProgressIndicator(
+                                progress = { uiState.vlmIndexProgress },
+                                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                                color = Color(0xFF8957E5),
+                                trackColor = Color(0xFF30363D)
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    uiState.vlmIndexMessage, 
+                                    fontSize = 11.sp, 
+                                    color = Color(0xFF8B949E)
+                                )
+                                TextButton(
+                                    onClick = onCancelVlmIndex,
+                                    contentPadding = PaddingValues(horizontal = 8.dp)
+                                ) {
+                                    Text("Cancel", fontSize = 11.sp, color = Color(0xFFF85149))
+                                }
+                            }
+                        }
+                    } else {
+                        // VLM Index Button
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            ForceVlmIndexButton(
+                                onNormalClick = onVlmIndex,
+                                onForceIndex = onForceVlmIndex,
+                                modifier = Modifier.weight(1f).height(36.dp)
+                            )
+                            Text(
+                                "${uiState.vlmIndexedCount} indexed",
+                                fontSize = 11.sp,
+                                color = Color(0xFF8B949E)
+                            )
+                        }
                     }
                 }
             }
@@ -506,6 +662,7 @@ private fun SearchTab(
                                 val badgeColor = when (result.matchType) {
                                     MatchType.CLIP -> Color(0xFF8957E5) // Purple for CLIP
                                     MatchType.HYBRID -> Color(0xFFD29922) // Orange for hybrid
+                                    MatchType.VISION_LLM -> Color(0xFF8957E5) // Purple for VLM
                                     else -> Color(0xFF58A6FF) // Blue for OCR
                                 }
                                 Box(
@@ -650,6 +807,7 @@ private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSe
                 val badgeColor = when (result.matchType) {
                     MatchType.CLIP -> Color(0xFF8957E5)
                     MatchType.HYBRID -> Color(0xFFD29922)
+                    MatchType.VISION_LLM -> Color(0xFF8957E5) // Purple for VLM
                     else -> Color(0xFF58A6FF)
                 }
                 Box(
@@ -690,6 +848,82 @@ private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSe
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ForceVlmIndexButton(
+    onNormalClick: () -> Unit,
+    onForceIndex: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isPressed by remember { mutableStateOf(false) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var buttonText by remember { mutableStateOf("🧠 VLM Index") }
+    
+    // Animation for progress
+    LaunchedEffect(isPressed) {
+        if (isPressed) {
+            // Start progress after 2 seconds, complete at 5 seconds
+            val startDelay = 2000L
+            val progressDuration = 3000L // 2s to 5s = 3s
+            
+            kotlinx.coroutines.delay(startDelay)
+            buttonText = "⚡ Force VLM..."
+            
+            val startTime = System.currentTimeMillis()
+            while (isPressed && progress < 1f) {
+                val elapsed = System.currentTimeMillis() - startTime
+                progress = (elapsed.toFloat() / progressDuration).coerceIn(0f, 1f)
+                kotlinx.coroutines.delay(50)
+            }
+            
+            if (progress >= 1f) {
+                onForceIndex()
+            }
+        } else {
+            progress = 0f
+            buttonText = "🧠 VLM Index"
+        }
+    }
+    
+    Box(
+        modifier = modifier
+            .height(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xFF8957E5))
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        isPressed = true
+                        val released = tryAwaitRelease()
+                        if (released && progress < 0.1f) {
+                            // Short press - normal indexing
+                            onNormalClick()
+                        }
+                        isPressed = false
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        // Progress overlay (left to right fill)
+        if (progress > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(progress)
+                    .align(Alignment.CenterStart)
+                    .background(Color(0xFFA371F7))
+            )
+        }
+        
+        Text(
+            text = buttonText,
+            fontSize = 12.sp,
+            color = Color.White,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 

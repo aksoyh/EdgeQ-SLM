@@ -1,0 +1,30 @@
+{
+  "session_id": "bd50397e-1b18-4bdc-83d5-11539088fd0d",
+  "start_timestamp": 1769593737093,
+  "end_timestamp": 1769611754220,
+  "app_version": "1.0",
+  "model_id": "qwen-q8_0.gguf",
+  "model_path": "\/sdcard\/Android\/data\/com.aksoyapps.edgeqslm\/files\/qwen-q8_0.gguf",
+  "quantization_variant": "QUANTIZED_INT8",
+  "device_info": {
+    "model": "2407FPN8EG",
+    "manufacturer": "Xiaomi",
+    "os_version": "16",
+    "sdk_version": 36,
+    "abi": "arm64-v8a",
+    "cpu_cores": 8,
+    "total_ram_mb": 11190,
+    "available_ram_mb": 1362
+  },
+  "temperature_sweep": [
+    0.1,
+    1.1,
+    2
+  ],
+  "repeats_per_condition": 3,
+  "warmup_runs": 1,
+  "prompt_count": 18,
+  "total_runs": 486,
+  "successful_runs": 486,
+  "failed_runs": 0
+}

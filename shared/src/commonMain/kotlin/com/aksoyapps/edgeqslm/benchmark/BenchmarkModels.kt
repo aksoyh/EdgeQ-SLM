@@ -183,9 +183,9 @@ data class BenchmarkMetadata(
  * Configuration for the entire benchmark session.
  */
 data class BenchmarkConfig(
-    val temperatures: List<Float> = listOf(0.1f, 0.3f, 0.7f, 1.0f, 1.3f, 1.7f, 2.0f),
-    val maxTokensSweep: List<Int> = listOf(128, 256, 512, 1024, 2048),  // Token count sweep
-    val repeatsPerCondition: Int = 5,
+    val temperatures: List<Float> = listOf(0.1f, 1.1f, 2.0f),
+    val maxTokensSweep: List<Int> = listOf(128, 512, 1024),  // Token count sweep
+    val repeatsPerCondition: Int = 3,
     val warmupRuns: Int = 1,
     val topP: Float = 0.9f,
     val repeatPenalty: Float = 1.1f,
@@ -229,6 +229,7 @@ data class BenchmarkUiState(
     val error: String? = null,
     val exportPath: String? = null,
     val config: BenchmarkConfig = BenchmarkConfig(),
-    val previousExports: List<Any> = emptyList()  // List<ExportSession> on Android
+    val previousExports: List<Any> = emptyList(),  // List<ExportSession> on Android
+    val legacyExports: List<Any> = emptyList()     // List<LegacyExport> on Android
 )
 

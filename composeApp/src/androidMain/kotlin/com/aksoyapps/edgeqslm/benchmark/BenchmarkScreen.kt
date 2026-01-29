@@ -91,6 +91,15 @@ fun BenchmarkScreen(
                 )
             }
             
+            // Legacy Indexing Results Section
+            val legacyExports = uiState.legacyExports.filterIsInstance<LegacyExport>()
+            if (legacyExports.isNotEmpty()) {
+                LegacyResultsCard(
+                    exports = legacyExports,
+                    onShare = { viewModel.shareLegacyExport(it) }
+                )
+            }
+            
             // Progress Card (when running)
             if (uiState.isRunning && uiState.progress != null) {
                 ProgressCard(uiState.progress!!)
@@ -796,7 +805,7 @@ private fun PreviousResultsCard(
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "📁 Previous Results (${sessions.size})",
+                text = "📁 Previous Benchmark Results (${sessions.size})",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
@@ -869,6 +878,76 @@ private fun PreviousResultRow(
             ) {
                 Text("🗑️", fontSize = 16.sp)
             }
+        }
+    }
+}
+
+@Composable
+private fun LegacyResultsCard(
+    exports: List<LegacyExport>,
+    onShare: (LegacyExport) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "📸 Previous Indexing Results",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            exports.forEach { export ->
+                LegacyResultRow(
+                    export = export,
+                    onShare = { onShare(export) }
+                )
+                if (export != exports.last()) {
+                    Divider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegacyResultRow(
+    export: LegacyExport,
+    onShare: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = export.filename,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "${export.displayDate} • ${"%.1f".format(export.sizeKb)} KB",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        
+        // Share button
+        IconButton(
+            onClick = onShare,
+            modifier = Modifier.size(36.dp)
+        ) {
+            Text("📤", fontSize = 16.sp)
         }
     }
 }

@@ -1,6 +1,9 @@
 # Experiment Protocol
 
 **Project:** EdgeQ-SLM – On-Device Small Language Model Inference  
+**Thesis:** Efficient Quantization and Low-Latency Inference of Small Language Models on Mobile Devices  
+**Author:** Hasan Aksoy (140130)  
+**Program:** MSc Advanced Analytics – Big Data, SGH Warsaw School of Economics  
 **Version:** 1.0  
 **Last Updated:** January 2026
 

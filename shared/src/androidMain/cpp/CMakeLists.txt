@@ -53,6 +53,46 @@ endif()
 # Add llama.cpp as a subdirectory
 add_subdirectory(${LLAMA_CPP_PATH} ${CMAKE_CURRENT_BINARY_DIR}/llama.cpp)
 
+# Build mtmd (multi-modal) library for vision support
+# This includes all model implementations and audio support
+add_library(mtmd STATIC
+    ${LLAMA_CPP_PATH}/tools/mtmd/clip.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/mtmd.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/mtmd-audio.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/mtmd-helper.cpp
+    # Model-specific implementations
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/cogvlm.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/conformer.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/glm4v.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/internvl.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/kimivl.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/llama4.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/llava.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/minicpmv.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/mobilenetv5.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/pixtral.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/qwen2vl.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/qwen3vl.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/siglip.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/whisper-enc.cpp
+    ${LLAMA_CPP_PATH}/tools/mtmd/models/youtuvl.cpp
+)
+
+target_include_directories(mtmd PRIVATE
+    ${LLAMA_CPP_PATH}/include
+    ${LLAMA_CPP_PATH}/common
+    ${LLAMA_CPP_PATH}/ggml/include
+    ${LLAMA_CPP_PATH}/src
+    ${LLAMA_CPP_PATH}/tools/mtmd
+    ${LLAMA_CPP_PATH}/tools/mtmd/models
+    ${LLAMA_CPP_PATH}/vendor  # For miniaudio and stb_image
+)
+
+# Suppress warnings for stb_image.h and miniaudio.h (header-only libs)
+target_compile_options(mtmd PRIVATE -Wno-cast-qual)
+
+target_link_libraries(mtmd PRIVATE llama ggml)
+
 # Find required Android libs
 find_library(log-lib log)
 find_library(android-lib android)
@@ -68,12 +108,14 @@ target_include_directories(llama_jni PRIVATE
     ${LLAMA_CPP_PATH}/common
     ${LLAMA_CPP_PATH}/ggml/include
     ${LLAMA_CPP_PATH}/src
+    ${LLAMA_CPP_PATH}/tools/mtmd
 )
 
-# Link libraries
+# Link libraries (added mtmd for vision support)
 target_link_libraries(llama_jni
     llama
     common
+    mtmd
     ${log-lib}
     ${android-lib}
 )

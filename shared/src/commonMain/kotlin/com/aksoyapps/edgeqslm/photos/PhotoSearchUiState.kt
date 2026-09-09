@@ -48,6 +48,8 @@ data class PhotoSearchUiState(
     val searchQuery: String = "",
     val searchResults: List<PhotoSearchResultUi> = emptyList(),
     val isSearching: Boolean = false,
+    val lastSubmittedQuery: String? = null,
+    val searchError: String? = null,
     val searchMode: SearchMode = SearchMode.ML_BASED,  // Current search backend
     
     // Photo List (taranan/taranmayan)
@@ -95,6 +97,8 @@ data class PhotoFileUi(
     val sizeKb: Long,
     val isIndexed: Boolean,
     val channelStates: Map<String, String> = emptyMap(),
+    val channelDisplayStatuses: Map<String, String> = emptyMap(),
+    val channelDetails: Map<String, String> = emptyMap(),
 )
 
 /**

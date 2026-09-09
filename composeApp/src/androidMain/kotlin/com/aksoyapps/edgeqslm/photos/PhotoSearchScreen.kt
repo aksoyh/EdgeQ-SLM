@@ -63,6 +63,7 @@ fun PhotoSearchScreen(
 ) {
     var selectedPhoto by remember { mutableStateOf<PhotoSearchResultUi?>(null) }
     val scrollState = rememberScrollState()
+    LaunchedEffect(uiState.selectedTab) { scrollState.scrollTo(0) }
     
     Column(
         modifier = modifier
@@ -94,9 +95,11 @@ fun PhotoSearchScreen(
         
         Spacer(modifier = Modifier.height(12.dp))
 
-        StatusCard(uiState, onStartIndexing, onResumeIndexing, onStopIndexing, onRefresh,
-            onSelectFolder, onThesisModeChange, onRandomSample, onResetSelection,
-            sourceExpanded, onSourceExpandedChange, onOpenModels, onCompleteMissingChannels)
+        if (uiState.selectedTab == 0) {
+            StatusCard(uiState, onStartIndexing, onResumeIndexing, onStopIndexing, onRefresh,
+                onSelectFolder, onThesisModeChange, onRandomSample, onResetSelection,
+                sourceExpanded, onSourceExpandedChange, onOpenModels, onCompleteMissingChannels)
+        }
 
         uiState.error?.let { error ->
             Snackbar(
@@ -121,7 +124,7 @@ fun PhotoSearchScreen(
                     matchReason = ""
                 )
             }
-            1 -> SearchTabScrollable(uiState, onQueryChange, onSearch) { selectedPhoto = it }
+            1 -> SearchTabScrollable(uiState, onQueryChange, onSearch, onThesisModeChange) { selectedPhoto = it }
         }
         
     }
@@ -380,15 +383,12 @@ private fun StatusCard(
     var showSample by remember { mutableStateOf(false) }
     var showThesis by remember { mutableStateOf(false) }
     var showModeDetails by remember { mutableStateOf(false) }
-    var modeExpanded by remember { mutableStateOf(false) }
     val busy = uiState.isIndexing || uiState.isSelectingPhotos || uiState.isIndexingPreflight
     val modeUnavailable = uiState.thesisMode !in uiState.enabledThesisModes
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            TextButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.fillMaxWidth()) {
-                Text("${if (expanded) "▾" else "▸"} Indexing & Source", style = MaterialTheme.typography.titleSmall)
-            }
-            Text("${uiState.totalPhotos} selected · ${uiState.searchableCount} searchable · ${uiState.partiallyIndexedCount} partial",
+            ThesisDisclosureButton("Indexing & Source", expanded, { onExpandedChange(!expanded) })
+            Text("Selected ${uiState.totalPhotos} · Searchable ${uiState.searchableCount} · Full ${uiState.fullyIndexedCount} · Partial ${uiState.partiallyIndexedCount}",
                 style = MaterialTheme.typography.bodySmall)
             if (uiState.isIndexing || uiState.isIndexingPreflight || uiState.isSelectingPhotos) {
                 if (uiState.isIndexing) LinearProgressIndicator(progress = { uiState.indexingProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
@@ -432,6 +432,8 @@ private fun StatusCard(
                 }
                 Text("Full ${uiState.fullyIndexedCount} · failed/unavailable ${uiState.failedUnavailableCount} · existing index ${uiState.existingIndexCount}", style = MaterialTheme.typography.labelSmall)
                 Text(uiState.coverageSummary, style = MaterialTheme.typography.labelSmall)
+                Text("Partial means the photo remains searchable, but one or more optional indexing channels are unavailable.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (uiState.missingChannelSummary.isNotBlank()) Text(uiState.missingChannelSummary, style = MaterialTheme.typography.bodySmall)
                 Text("New selections need indexing. Existing compatible indexes remain searchable.", style = MaterialTheme.typography.bodySmall)
                 if (!uiState.isIndexing) {
@@ -445,20 +447,7 @@ private fun StatusCard(
                         TextButton(onClick = onReset, enabled = !busy && uiState.totalPhotos > 0) { Text("Reset selection") }
                     }
                 }
-                Box {
-                    OutlinedButton(onClick = { modeExpanded = true }, enabled = !uiState.isSearching && !uiState.isIndexingPreflight) {
-                        Text("Mode: ${uiState.thesisMode.displayLabel()}")
-                    }
-                    DropdownMenu(expanded = modeExpanded, onDismissRequest = { modeExpanded = false }) {
-                        ThesisSearchMode.values().forEach { mode ->
-                            DropdownMenuItem(enabled = mode in uiState.enabledThesisModes,
-                                text = { Column {
-                                    Text(mode.displayLabel())
-                                    Text(uiState.modeReasons[mode] ?: "Checking models and index…", style = MaterialTheme.typography.labelSmall)
-                                } }, onClick = { onMode(mode); modeExpanded = false })
-                        }
-                    }
-                }
+                SearchModeSelector(uiState, onMode)
                 Text(uiState.modeReasons[uiState.thesisMode] ?: "Checking compatible models and index…", style = MaterialTheme.typography.bodySmall)
                 Text("Mode changes affect retrieval only. Completing channels reuses compatible work for this same photo set.", style = MaterialTheme.typography.labelSmall)
                 TextButton(onClick = { showThesis = true }) { Text(stringResource(R.string.thesis_configuration)) }
@@ -572,9 +561,16 @@ private fun PhotoFilesListScrollable(photos: List<PhotoFileUi>, onPhotoClick: (P
 
 @Composable
 private fun PhotoFileRow(photo: PhotoFileUi, onPhotoClick: (PhotoFileUi) -> Unit) {
+    val badge = when {
+        photo.channelStates.isNotEmpty() && photo.channelStates.values.all { it == "SUCCESS" } -> "Full"
+        listOf("OCR", "CLIP", "MiniLM vector").any { photo.channelStates[it] == "SUCCESS" } -> "Partial"
+        photo.channelStates.values.any { it != "NOT_INDEXED" } -> "Unavailable"
+        photo.isIndexed -> "Existing"
+        else -> "New"
+    }
     Row(
         modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).clickable { onPhotoClick(photo) }.padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.Top
     ) {
         // Thumbnail
         Card(modifier = Modifier.size(48.dp), shape = RoundedCornerShape(6.dp)) {
@@ -589,31 +585,40 @@ private fun PhotoFileRow(photo: PhotoFileUi, onPhotoClick: (PhotoFileUi) -> Unit
         Spacer(modifier = Modifier.width(10.dp))
         
         Column(modifier = Modifier.weight(1f)) {
-            Text(photo.name, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(photo.name, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Surface(shape = RoundedCornerShape(4.dp),
+                    color = if (badge == "Full") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = if (badge == "Full") MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer) {
+                    Text(badge, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+                }
+            }
             Text("${photo.sizeKb} KiB", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (photo.channelStates.isEmpty()) {
                 Text(if (photo.isIndexed) "Existing index · coverage not yet measured" else "Unindexed · unavailable to search",
-                    style = MaterialTheme.typography.labelSmall)
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
-                Text(photo.channelStates.entries.joinToString(" · ") { "${it.key}: ${it.value.lowercase().replace('_', ' ')}" },
-                    style = MaterialTheme.typography.labelSmall)
-                if (photo.channelStates["MiniLM vector"] != "SUCCESS" && photo.channelStates["CLIP"] == "SUCCESS") {
-                    Text("Semantic source unavailable — searchable via CLIP/OCR where available.", style = MaterialTheme.typography.labelSmall)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
+                    photo.channelStates.forEach { (channel, state) ->
+                        Column {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                Text(channel.replace("source", "Source").replace("projection", "Projection").replace("vector", "Vector"), fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                                Text(photo.channelDisplayStatuses[channel] ?: if (state == "SUCCESS") "Indexed" else state.lowercase().replace('_', ' '),
+                                    fontWeight = FontWeight.Normal, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface)
+                            }
+                            photo.channelDetails[channel]?.let { detail ->
+                                Text(detail, fontWeight = FontWeight.Normal, style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
                 }
             }
         }
         
-        Box(
-            modifier = Modifier.background(if (photo.isIndexed) Color(0xFF238636) else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 3.dp)
-        ) {
-            Text(when {
-                photo.channelStates.isNotEmpty() && photo.channelStates.values.all { it == "SUCCESS" } -> "Full"
-                listOf("OCR", "CLIP", "MiniLM vector").any { photo.channelStates[it] == "SUCCESS" } -> "Partial"
-                photo.channelStates.values.any { it != "NOT_INDEXED" } -> "Unavailable"
-                photo.isIndexed -> "Existing"
-                else -> "New"
-            }, fontSize = 10.sp)
-        }
     }
 }
 
@@ -733,91 +738,97 @@ private fun SearchTab(
 }
 
 @Composable
+private fun SearchModeSelector(uiState: PhotoSearchUiState, onMode: (ThesisSearchMode) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        ThesisDisclosureButton("Search mode: ${uiState.thesisMode.displayLabel()}", expanded,
+            onClick = { expanded = !expanded }, enabled = !uiState.isSearching && !uiState.isIndexingPreflight)
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            ThesisSearchMode.values().forEach { mode ->
+                DropdownMenuItem(enabled = mode in uiState.enabledThesisModes,
+                    text = { Column {
+                        Text(mode.displayLabel())
+                        Text(if (mode in uiState.enabledThesisModes) "Ready" else "Not ready — models or compatible index needed",
+                            style = MaterialTheme.typography.labelSmall)
+                    } }, onClick = { onMode(mode); expanded = false })
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 private fun SearchTabScrollable(
     uiState: PhotoSearchUiState,
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
+    onMode: (ThesisSearchMode) -> Unit,
     onPhotoClick: (PhotoSearchResultUi) -> Unit
 ) {
-    Column {
+    val phase = PhotoSearchPresentation.status(uiState)
+    val canSubmit = PhotoSearchPresentation.canSubmit(uiState)
+    var details by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Existing index ${uiState.existingIndexCount} · Selected searchable ${uiState.searchableCount}",
+            style = MaterialTheme.typography.bodySmall)
+        SearchModeSelector(uiState, onMode)
         OutlinedTextField(
             value = uiState.searchQuery,
             onValueChange = onQueryChange,
+            enabled = !uiState.isSearching,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Search indexed photos...", color = MaterialTheme.colorScheme.onSurfaceVariant) },
-            leadingIcon = {
-                if (uiState.isSearching) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFF58A6FF), strokeWidth = 2.dp)
-                else Text("🔍", fontSize = 18.sp)
-            },
+            label = { Text("Describe a photo or enter text") },
+            placeholder = { Text("Type any search query") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { onSearch() }),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color(0xFF58A6FF),
-                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-                focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
-                cursorColor = Color(0xFF58A6FF)
-            ),
-            shape = RoundedCornerShape(12.dp)
+            keyboardActions = KeyboardActions(onSearch = { if (canSubmit) onSearch() }),
+            shape = RoundedCornerShape(12.dp),
         )
-        
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Button(onClick = onSearch, enabled = uiState.searchQuery.isNotBlank() && !uiState.isSearching &&
-            uiState.thesisMode in uiState.enabledThesisModes) { Text("Search") }
-        Text(uiState.thesisMode.displayLabel(), style = MaterialTheme.typography.labelMedium)
-        if (uiState.searchNote.isNotBlank()) Text(uiState.searchNote, style = MaterialTheme.typography.bodySmall)
-        uiState.lastQueryMs?.let { Text("Last query: ${"%.1f".format(it)} ms (diagnostic)", style = MaterialTheme.typography.labelSmall) }
-
-        // Query decomposition debug panel — shown for every search, not just one mode
-        if (uiState.slmDebugPlan.isNotBlank()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-                    .padding(10.dp)
-            ) {
-                Text(
-                    "🧩 Plan: ${uiState.slmDebugPlan}",
-                    fontSize = 10.sp,
-                    color = Color(0xFFD29922),
-                    maxLines = 2
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
+        Button(onClick = onSearch, enabled = canSubmit, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            Text(if (uiState.isSearching) "Searching…" else "Search")
         }
-
-        if (uiState.searchResults.isNotEmpty()) {
-            Text("Found ${uiState.searchResults.size} results", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
-
-            // Use Column with chunked rows for scrollable parent compatibility
-            val chunkedResults = uiState.searchResults.chunked(2)
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                chunkedResults.forEach { rowItems ->
+        val examples = PhotoSearchPresentation.examples(uiState.thesisMode, uiState.thesisMode in uiState.enabledThesisModes)
+        if (examples.isNotEmpty()) {
+            Text("Try an example or write your own", style = MaterialTheme.typography.labelMedium)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                examples.forEach { example ->
+                    SuggestionChip(onClick = { onQueryChange(example) }, enabled = !uiState.isSearching,
+                        label = { Text(example) }, modifier = Modifier.heightIn(min = 48.dp))
+                }
+            }
+            Text("Examples only fill the field. Tap Search when ready. They are not taken from your photos.",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        when (phase) {
+            SearchViewStatus.LOADING -> {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text("Searching on this device. The first model load can take longer.", style = MaterialTheme.typography.bodySmall)
+            }
+            SearchViewStatus.MODE_UNAVAILABLE -> Text("This mode is not ready. Choose an available mode or install models and complete indexing in Files.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            SearchViewStatus.ERROR -> Text(uiState.searchError ?: "Search could not finish. See Details.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            SearchViewStatus.EMPTY -> Text("No results for this search. Try different wording or choose another available mode.",
+                style = MaterialTheme.typography.bodyMedium)
+            SearchViewStatus.READY -> Text("Enter any query, then tap Search. Suggestions are optional.",
+                style = MaterialTheme.typography.bodySmall)
+            SearchViewStatus.RESULTS -> {
+                Text("${uiState.searchResults.size} results", style = MaterialTheme.typography.labelMedium)
+                uiState.searchResults.chunked(2).forEach { rowItems ->
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        rowItems.forEach { result ->
-                            SearchResultCard(result, onPhotoClick, Modifier.weight(1f))
-                        }
-                        // Add empty spacer if odd number
-                        if (rowItems.size == 1) {
-                            Spacer(modifier = Modifier.weight(1f))
-                        }
+                        rowItems.forEach { result -> SearchResultCard(result, onPhotoClick, Modifier.weight(1f)) }
+                        if (rowItems.size == 1) Spacer(modifier = Modifier.weight(1f))
                     }
                 }
             }
-        } else if (uiState.searchQuery.isNotBlank() && !uiState.isSearching) {
-            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                Text("No results for \"${uiState.searchQuery}\"", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("🔍", fontSize = 40.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Choose a compatible mode and search your existing local index", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
+        }
+        if (uiState.isIndexing) Text("Indexing is active. Open Files for progress and pause controls.",
+            style = MaterialTheme.typography.bodySmall)
+        ThesisDisclosureButton("Search details", details, { details = !details })
+        if (details) {
+            Text(uiState.modeReasons[uiState.thesisMode] ?: "Checking compatible models and index…", style = MaterialTheme.typography.bodySmall)
+            if (uiState.searchNote.isNotBlank()) Text(uiState.searchNote, style = MaterialTheme.typography.bodySmall)
+            uiState.lastQueryMs?.let { Text("Last query: ${"%.1f".format(it)} ms (diagnostic)", style = MaterialTheme.typography.labelSmall) }
         }
     }
 }

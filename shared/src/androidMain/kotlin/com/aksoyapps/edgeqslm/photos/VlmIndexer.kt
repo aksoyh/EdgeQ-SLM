@@ -11,7 +11,8 @@ import kotlin.coroutines.coroutineContext
 /** Resumable structured-source indexing. A generation is attempted at most once per row per run. */
 class VlmIndexer(
     private val vlmAnalyzer: VlmSourceAnalyzer,
-    private val vectorStore: PhotoVectorStore
+    private val vectorStore: PhotoVectorStore,
+    private val onDiagnostic: (String, VlmSourceDiagnostic) -> Unit = { _, _ -> },
 ) {
     /**
      * Explicit starts can resume incomplete rows. Sticky service recovery processes only unattempted
@@ -93,10 +94,32 @@ class VlmIndexer(
         var raw: String? = null
         var imageTransform: VlmImageTransform? = null
         var claimed = false
+        var observation = VlmSourceDiagnostic(failureStage = VlmFailureStage.IMAGE_OPEN,
+            inferenceCompleted = false, parseStatus = VlmEvidenceStatus.NOT_REACHED,
+            schemaStatus = VlmEvidenceStatus.NOT_REACHED, eligibilityStatus = VlmEvidenceStatus.NOT_REACHED,
+            projectionStatus = VlmEvidenceStatus.NOT_REACHED, observedThisRun = true)
+        fun observed(value: VlmSourceDiagnostic) {
+            runCatching { onDiagnostic(photo.filePath, value.copy(durationMs = System.currentTimeMillis() - start)) }
+        }
+        fun recordFailure(error: Throwable, state: SemanticSourceState, code: String) {
+            var failed = observation.failed(error, raw)
+            try {
+                val persisted = persistFailure(photo, expectedSource, previous, imageRevision, raw,
+                    claimed, state, code, imageTransform)
+                if (persisted != null) failed = failed.copy(persistenceStatus =
+                    if (persisted) VlmEvidenceStatus.PASS else VlmEvidenceStatus.FAIL,
+                    persistenceReasonCode = if (!persisted) VlmFailureReason.SOURCE_PERSISTENCE_FAILED else null)
+            } catch (persistenceFailure: Throwable) {
+                failed = failed.copy(persistenceStatus = VlmEvidenceStatus.FAIL,
+                    persistenceReasonCode = VlmFailureReason.SOURCE_PERSISTENCE_FAILED)
+                throw persistenceFailure
+            } finally { observed(failed) }
+        }
         try {
             coroutineContext.ensureActive()
             imageRevision = VlmImageAnalyzer.imageRevision(photo.filePath)
             if (previous?.isCurrent(imageRevision) == true) {
+                VlmFailureTaxonomy.retained(previous, true)?.let(::observed)
                 return VlmIndexResult(true, photo.vlmDescription.orEmpty(), photo.vlmTags.orEmpty(),
                     System.currentTimeMillis() - start)
             }
@@ -106,48 +129,75 @@ class VlmIndexer(
             }
             if (previous?.hasAcceptedInferenceContract() == true &&
                 previous.imageRevision == imageRevision && reusable != null) {
+                observation = observation.copy(failureStage = VlmFailureStage.SOURCE_ELIGIBILITY,
+                    parseStatus = VlmEvidenceStatus.PASS, schemaStatus = VlmEvidenceStatus.PASS)
                 VlmSourceQuality.requireSearchableCandidate(reusable)
                 val source = StructuredSemanticSource(
                     state = SemanticSourceState.VALID, imageRevision = imageRevision,
                     rawGeneration = previous.rawGeneration, structured = reusable,
                     imageTransform = previous.imageTransform
                 )
-                return commit(photo, expectedSource, source, start)
+                observation = observation.copy(failureStage = VlmFailureStage.SOURCE_PERSISTENCE,
+                    eligibilityStatus = VlmEvidenceStatus.PASS)
+                return commit(photo, expectedSource, source, start).also {
+                    observed(requireNotNull(VlmFailureTaxonomy.retained(source, true)))
+                }
             }
             if (!allowInference) return failure("explicit_resume_required", start)
             val marker = if (previous?.structured != null) previous.asStale() else
                 StructuredSemanticSource(SemanticSourceState.IN_PROGRESS, imageRevision)
             expectedSource = marker.serialize()
+            observation = observation.copy(failureStage = VlmFailureStage.SOURCE_PERSISTENCE)
             check(writeSource(
                 photo.id, photo.fileModified, photo.semanticSource, expectedSource
             )) { "source_claim_conflict" }
             claimed = true
 
-            val analysis = vlmAnalyzer.analyzeImage(photo.filePath)
+            observation = observation.copy(failureStage = VlmFailureStage.INFERENCE)
+            val analysis = try { vlmAnalyzer.analyzeImage(photo.filePath) } catch (failure: Throwable) {
+                observation = vlmAnalyzer.lastDiagnostic ?: observation
+                throw failure
+            }
             raw = analysis.generation.text
             imageTransform = analysis.imageTransform
+            observation = (vlmAnalyzer.lastDiagnostic ?: observation).copy(
+                failureStage = VlmFailureStage.INFERENCE, inferenceCompleted = true,
+                generationNonempty = raw.isNotBlank())
             coroutineContext.ensureActive()
+            observation = observation.copy(failureStage = VlmFailureStage.PARSING)
             val structured = StructuredVisualSource.parseCurrent(raw)
+            observation = observation.copy(failureStage = VlmFailureStage.SOURCE_ELIGIBILITY,
+                parseStatus = VlmEvidenceStatus.PASS, schemaStatus = VlmEvidenceStatus.PASS)
             VlmSourceQuality.requireSearchableCandidate(structured)
+            observation = observation.copy(failureStage = VlmFailureStage.IMAGE_OPEN,
+                eligibilityStatus = VlmEvidenceStatus.PASS)
             check(VlmImageAnalyzer.imageRevision(photo.filePath) == imageRevision) {
                 "image_changed_during_inference"
             }
+            observation = observation.copy(failureStage = VlmFailureStage.PROJECTION)
             val source = StructuredSemanticSource(
                 state = SemanticSourceState.VALID, imageRevision = imageRevision,
                 rawGeneration = raw, structured = structured, imageTransform = imageTransform
             )
-            return commit(photo, expectedSource, source, start)
+            observation = observation.copy(failureStage = VlmFailureStage.SOURCE_PERSISTENCE,
+                projectionStatus = if (source.currentProjection?.isEligible == true) VlmEvidenceStatus.PASS else VlmEvidenceStatus.UNAVAILABLE)
+            return commit(photo, expectedSource, source, start).also {
+                observed(observation.copy(reasonCode = VlmFailureReason.SUCCESS, failureStage = VlmFailureStage.NONE,
+                    persistenceStatus = VlmEvidenceStatus.PASS))
+            }
         } catch (e: CancellationException) {
-            persistFailure(photo, expectedSource, previous, imageRevision, raw, claimed,
-                SemanticSourceState.INTERRUPTED, "indexing_cancelled", imageTransform)
+            recordFailure(e, SemanticSourceState.INTERRUPTED, "indexing_cancelled")
             throw e
         } catch (e: Exception) {
             val error = e.message ?: e.javaClass.simpleName
-            persistFailure(photo, expectedSource, previous, imageRevision, raw, claimed,
+            recordFailure(e,
                 if (error in setOf("image_exceeds_admission_limit", "image_source_safety_limit",
                         "image_decode_budget_exceeded")) SemanticSourceState.DEFERRED
-                else SemanticSourceState.INVALID, error, imageTransform)
+                else SemanticSourceState.INVALID, error)
             return failure(error, start)
+        } catch (error: Error) {
+            observed(observation.failed(error, raw))
+            throw error
         }
     }
 
@@ -168,19 +218,20 @@ class VlmIndexer(
         photo: PhotoRecord, expectedSource: String?, previous: StructuredSemanticSource?,
         revision: ImageRevision?, raw: String?, claimed: Boolean,
         state: SemanticSourceState, error: String, imageTransform: VlmImageTransform?
-    ) {
-        if (!claimed || revision == null) return
+    ): Boolean? {
+        if (!claimed || revision == null) return null
         // Retain the last complete structured source when a replacement attempt fails.
         val failed = if (previous?.structured != null)
             previous.asStale().copy(errorCode = error)
         else StructuredSemanticSource(state, revision, rawGeneration = raw, errorCode = error,
             imageTransform = imageTransform)
-        try {
+        return try {
             vectorStore.compareAndSetVlmSource(
                 photo.id, photo.fileModified, expectedSource, failed.serialize()
             )
         } catch (_: Exception) {
             // The durable claim remains incomplete when SQLite itself is unavailable.
+            false
         }
     }
 

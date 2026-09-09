@@ -10,6 +10,7 @@ import kotlinx.coroutines.ensureActive
 import kotlin.coroutines.coroutineContext
 
 interface VlmSourceAnalyzer {
+    val lastDiagnostic: VlmSourceDiagnostic? get() = null
     fun isAvailable(): Boolean
     suspend fun <T> withSession(block: suspend () -> T): T
     suspend fun analyzeImage(imagePath: String): VlmSourceAnalysis
@@ -24,6 +25,8 @@ class VlmImageAnalyzer(context: Context) : VlmSourceAnalyzer {
     private val engine = AndroidLlamaCppEngine()
     private var sessionActive = false
     private val imageRuntime by lazy { VlmWorkingImage.runtime(this.context) }
+    override var lastDiagnostic: VlmSourceDiagnostic? = null
+        private set
 
     override fun isAvailable(): Boolean = runCatching {
         VlmInferenceContract.resolveArtifacts(context)
@@ -44,32 +47,52 @@ class VlmImageAnalyzer(context: Context) : VlmSourceAnalyzer {
         }
 
     override suspend fun analyzeImage(imagePath: String): VlmSourceAnalysis {
-        check(sessionActive) { "VLM analysis requires an exclusive indexing session" }
-        coroutineContext.ensureActive()
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(imagePath, options)
-        val plan = VlmImageAdmissionPolicy.plan(options.outWidth, options.outHeight, File(imagePath).length())
-        val working = if (plan.resized) VlmWorkingImage.prepare(imagePath, plan, imageRuntime) else null
-        coroutineContext.ensureActive()
-        if (!engine.isVisionLoaded()) {
-            val artifacts = VlmInferenceContract.resolveArtifacts(context)
-            diagnostics.measured("vlm_model_load") {
-                check(engine.loadModel(artifacts.model.absolutePath)) { "vlm_model_load_failed" }
+        var observation = VlmSourceDiagnostic(failureStage = VlmFailureStage.IMAGE_DECODE,
+            inferenceCompleted = false, parseStatus = VlmEvidenceStatus.NOT_REACHED,
+            schemaStatus = VlmEvidenceStatus.NOT_REACHED, eligibilityStatus = VlmEvidenceStatus.NOT_REACHED,
+            projectionStatus = VlmEvidenceStatus.NOT_REACHED, observedThisRun = true)
+        lastDiagnostic = observation
+        try {
+            check(sessionActive) { "VLM analysis requires an exclusive indexing session" }
+            coroutineContext.ensureActive()
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(imagePath, options)
+            observation = observation.copy(failureStage = VlmFailureStage.IMAGE_ADMISSION)
+            val plan = VlmImageAdmissionPolicy.plan(options.outWidth, options.outHeight, File(imagePath).length())
+            observation = observation.copy(failureStage = VlmFailureStage.IMAGE_RESIZE,
+                workingWidth = plan.width, workingHeight = plan.height)
+            val working = if (plan.resized) VlmWorkingImage.prepare(imagePath, plan, imageRuntime) else null
+            coroutineContext.ensureActive()
+            if (!engine.isVisionLoaded()) {
+                observation = observation.copy(failureStage = VlmFailureStage.MODEL_LOAD)
+                val artifacts = VlmInferenceContract.resolveArtifacts(context)
+                diagnostics.measured("vlm_model_load") {
+                    check(engine.loadModel(artifacts.model.absolutePath)) { "vlm_model_load_failed" }
+                }
+                diagnostics.modelState("vlm_lfm25_q5", "loaded")
+                observation = observation.copy(failureStage = VlmFailureStage.PROJECTOR_LOAD)
+                diagnostics.measured("vlm_projector_load") {
+                    check(engine.loadVisionProjector(artifacts.projector.absolutePath)) { "vlm_projector_load_failed" }
+                }
+                diagnostics.modelState("vlm_lfm25_projector_q8", "loaded")
             }
-            diagnostics.modelState("vlm_lfm25_q5", "loaded")
-            diagnostics.measured("vlm_projector_load") {
-                check(engine.loadVisionProjector(artifacts.projector.absolutePath)) { "vlm_projector_load_failed" }
-            }
-            diagnostics.modelState("vlm_lfm25_projector_q8", "loaded")
+            val prompt = VlmInferenceContract.prompt(context)
+            observation = observation.copy(failureStage = VlmFailureStage.IMAGE_DECODE)
+            val rgb = working?.rgb ?: VlmWorkingImage.legacyRgb(imagePath, plan.width, plan.height)
+            observation = observation.copy(failureStage = VlmFailureStage.IMAGE_ADMISSION)
+            check(plan.width.toLong() * plan.height <= VlmInferenceContract.MAX_IMAGE_PIXELS &&
+                rgb.size.toLong() == plan.width.toLong() * plan.height * 3) { "image_exceeds_admission_limit" }
+            observation = observation.copy(failureStage = VlmFailureStage.INFERENCE)
+            val generation = diagnostics.measured("vlm_inference", diagnostics.safeId(imagePath)) { engine.analyzeImage(
+                imageData = rgb, width = plan.width, height = plan.height,
+                prompt = prompt, maxTokens = VlmInferenceContract.MAX_TOKENS
+            ) }
+            lastDiagnostic = observation.copy(inferenceCompleted = true, generationNonempty = generation.text.isNotBlank())
+            return VlmSourceAnalysis(generation, working?.transform)
+        } catch (failure: Throwable) {
+            lastDiagnostic = observation.failed(failure)
+            throw failure
         }
-        val prompt = VlmInferenceContract.prompt(context)
-        val rgb = working?.rgb ?: VlmWorkingImage.legacyRgb(imagePath, plan.width, plan.height)
-        check(plan.width.toLong() * plan.height <= VlmInferenceContract.MAX_IMAGE_PIXELS &&
-            rgb.size.toLong() == plan.width.toLong() * plan.height * 3) { "image_exceeds_admission_limit" }
-        return VlmSourceAnalysis(diagnostics.measured("vlm_inference", diagnostics.safeId(imagePath)) { engine.analyzeImage(
-            imageData = rgb, width = plan.width, height = plan.height,
-            prompt = prompt, maxTokens = VlmInferenceContract.MAX_TOKENS
-        ) }, working?.transform)
     }
 
     companion object {

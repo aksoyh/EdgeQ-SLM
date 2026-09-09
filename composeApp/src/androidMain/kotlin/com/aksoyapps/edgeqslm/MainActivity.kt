@@ -244,7 +244,7 @@ fun MainAppWithTabs(
                 }
                 if (selectedTab == 0) {
                     PhotoSearchScreen(uiState = photoState,
-                        onQueryChange = photoSearchViewModel::updateQueryAndSearch,
+                        onQueryChange = photoSearchViewModel::updateQuery,
                         onSearch = photoSearchViewModel::search,
                         onStartIndexing = onStartIndexing,
                         onResumeIndexing = onResumeIndexing,

@@ -33,6 +33,7 @@ class PhotoSearchViewModel(private val context: Context) {
     private var indexingJob: Job? = null
     private val selectionStore = PhotoSelectionStore(context)
     private var readinessJob: Job? = null
+    @Volatile private var retainedVlmDiagnostics: Map<String, VlmSourceDiagnostic> = emptyMap()
     val selection: ThesisPhotoSelection? get() = selectionStore.snapshot()
     
     // VLM analyzer for Vision LLM search
@@ -149,8 +150,9 @@ class PhotoSearchViewModel(private val context: Context) {
 
     fun setThesisMode(mode: ThesisSearchMode) {
         if (mode !in _uiState.value.enabledThesisModes) return
-        _uiState.value = _uiState.value.copy(thesisMode = mode, searchResults = emptyList(), searchNote = "")
-        if (_uiState.value.searchQuery.isNotBlank()) search()
+        if (_uiState.value.isSearching) return
+        _uiState.value = _uiState.value.copy(thesisMode = mode, searchResults = emptyList(), searchNote = "",
+            lastSubmittedQuery = null, searchError = null, lastQueryMs = null)
     }
 
     fun chooseFolder(uri: android.net.Uri) = selectPhotos { selectionStore.chooseFolder(uri) }
@@ -233,6 +235,9 @@ class PhotoSearchViewModel(private val context: Context) {
             val selected = selectionStore.snapshot()
             val indexedPaths = photoIndexer?.getVectorStore()?.getAllIndexedPaths().orEmpty()
             val photos = selected?.photos.orEmpty()
+            retainedVlmDiagnostics = VlmDiagnosticReadView(context)
+                .enrich(ThesisIndexingStateStore(context).snapshot()?.photos.orEmpty())
+                .mapNotNull { photo -> photo.vlmDiagnostic?.let { photo.path to it } }.toMap()
             _uiState.value = _uiState.value.copy(
                 sourceLabel = selected?.source ?: "No photos selected",
                 selectionSessionId = selected?.sessionId.orEmpty(),
@@ -245,6 +250,7 @@ class PhotoSearchViewModel(private val context: Context) {
                 indexedCount = photos.count { it.path in indexedPaths },
                 existingIndexCount = indexedPaths.size,
             )
+            refreshIndexingState()
             refreshModeAvailability()
         }
     }
@@ -268,7 +274,7 @@ class PhotoSearchViewModel(private val context: Context) {
             indexingProcessed = session?.processed ?: 0,
             indexingTotal = session?.total ?: 0,
             indexingRssMiB = (memory["rss_bytes"] as? Number)?.toDouble()?.div(1024 * 1024) ?: session?.sampledRssMiB,
-            indexingPeakRssMiB = (memory["peak_sampled_rss_bytes"] as? Number)?.toDouble()?.div(1024 * 1024) ?: session?.peakSampledRssMiB,
+            indexingPeakRssMiB = session?.peakSampledRssMiB,
             indexingFailedPhotos = selectedStates.count { photo -> listOf(photo.ocr, photo.clip, photo.vlmSource,
                 photo.semanticProjection, photo.miniLmVector).any { it == ChannelIndexStatus.FAILED } },
             indexingUnavailablePhotos = selectedStates.count { photo -> listOf(photo.ocr, photo.clip, photo.vlmSource,
@@ -277,68 +283,44 @@ class PhotoSearchViewModel(private val context: Context) {
             fullyIndexedCount = coverage.fullyIndexed,
             partiallyIndexedCount = coverage.partiallyIndexed,
             failedUnavailableCount = coverage.failedUnavailable,
-            coverageSummary = "OCR ${coverage.ocr} · CLIP ${coverage.clip} · VLM ${coverage.vlmSource} · Projection ${coverage.semanticProjection} · MiniLM ${coverage.miniLmVector}",
+            coverageSummary = "OCR ${coverage.ocr}/${coverage.selected} · CLIP ${coverage.clip}/${coverage.selected} · VLM ${coverage.vlmSource}/${coverage.selected} · Semantic ${coverage.semanticProjection}/${coverage.selected} · MiniLM ${coverage.miniLmVector}/${coverage.selected}",
             photoFiles = state.photoFiles.map { photo ->
-                val channels = states[photo.path]
-                photo.copy(channelStates = if (channels == null) emptyMap() else mapOf(
+                val channels = states[photo.path]?.let { channel ->
+                    channel.copy(vlmDiagnostic = channel.vlmDiagnostic ?: retainedVlmDiagnostics[photo.path])
+                }
+                val statuses = if (channels == null) emptyMap() else linkedMapOf(
                     "OCR" to channels.ocr.name, "CLIP" to channels.clip.name,
                     "VLM source" to channels.vlmSource.name,
                     "Semantic projection" to channels.semanticProjection.name,
                     "MiniLM vector" to channels.miniLmVector.name,
-                ).mapValues { (name, status) -> channels.unavailableReasons[name]?.let { "$status: $it" } ?: status })
+                )
+                photo.copy(channelStates = statuses,
+                    channelDisplayStatuses = statuses.keys.associateWith { channels!!.presentation(it).status },
+                    channelDetails = statuses.keys.mapNotNull { key -> channels!!.presentation(key).detail?.let { key to it } }.toMap())
             },
         )
         if (state.isIndexing && session?.isRunning != true) refreshPhotoList()
     }
 
-    /**
-     * Update search query and search immediately
-     */
-    fun updateQueryAndSearch(query: String) {
-        _uiState.value = _uiState.value.copy(searchQuery = query)
-        if (query.length >= 2) {
-            search()
-        } else if (query.isEmpty()) {
-            _uiState.value = _uiState.value.copy(searchResults = emptyList())
-        }
-    }
-    
-    /**
-     * Perform a unified search: every available channel contributes to one ranked list.
-     *
-     * There is no exclusive "mode" that picks a single retrieval strategy anymore.
-     * Keyword scoring (OCR text, VLM tags/description, filename/path) via
-     * [SlmSearchEngine] always runs — it needs no loaded model, only a deterministic
-     * [QueryEnricher] fallback when TinyLlama isn't loaded. CLIP visual similarity is
-     * blended in on top of that whenever the CLIP encoder has been loaded. This mirrors
-     * the target architecture's "candidate ranking" stage: one local index, several
-     * retrieval channels, one combined result — instead of three switchable, isolated
-     * search backends.
-     */
-    fun search() {
-        val query = _uiState.value.searchQuery
-        if (query.isBlank()) return
-        searchUnified(query)
+    fun updateQuery(query: String) {
+        if (_uiState.value.isSearching) return
+        _uiState.value = PhotoSearchPresentation.editQuery(_uiState.value, query)
     }
 
-    /**
-     * generate() is a blocking JNI call that writes to a single global llama.cpp context.
-     * Concurrent calls corrupt that state and cause SIGSEGV. We drop any call that arrives
-     * while one is already in flight; after the current call finishes we check whether the
-     * query changed and, if so, run one final search for the latest value.
-     */
-    private fun searchUnified(query: String) {
-        if (isGenerating) return
-        val mode = _uiState.value.thesisMode
-        if (mode !in _uiState.value.enabledThesisModes) {
-            _uiState.value = _uiState.value.copy(error = _uiState.value.modeReasons[mode]
+    fun search() {
+        val state = _uiState.value
+        if (state.searchQuery.isBlank() || isGenerating) return
+        if (state.thesisMode !in state.enabledThesisModes) {
+            _uiState.value = state.copy(searchError = state.modeReasons[state.thesisMode]
                 ?: "This mode needs compatible models and an existing index")
             return
         }
+        val query = state.searchQuery
+        val mode = state.thesisMode
+        isGenerating = true
+        _uiState.value = state.copy(isSearching = true, searchError = null,
+            lastSubmittedQuery = query, searchResults = emptyList(), searchNote = "")
         scope.launch(Dispatchers.IO) {
-            if (isGenerating) return@launch
-            isGenerating = true
-            _uiState.value = _uiState.value.copy(isSearching = true, error = null)
             try {
                 val store = photoIndexer?.getVectorStore() ?: error("Index is unavailable")
                 val result = ThesisSearchEngine(context.applicationContext, store).search(query, mode)
@@ -346,18 +328,14 @@ class PhotoSearchViewModel(private val context: Context) {
                     isSearching = false, searchResults = result.results, searchNote = result.note,
                     lastQueryMs = result.timingsMs["total_ms"], slmDebugPlan = "",
                 )
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 _uiState.value = _uiState.value.copy(isSearching = false,
-                    searchResults = emptyList(), error = failure.message ?: "Search failed")
+                    searchResults = emptyList(), searchError = failure.message ?: "Search failed")
             } finally {
                 isGenerating = false
                 _uiState.value = _uiState.value.copy(isSearching = false)
-                val current = _uiState.value
-                if ((current.searchQuery != query || current.thesisMode != mode) && current.searchQuery.isNotBlank()) {
-                    searchUnified(current.searchQuery)
-                }
             }
         }
     }

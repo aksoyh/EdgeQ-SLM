@@ -32,6 +32,9 @@ kotlin {
             implementation(libs.mlkit.text.recognition)
             implementation(libs.workmanager.ktx)
         }
+        getByName("androidUnitTest").dependencies {
+            implementation(libs.junit)
+        }
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)
         }
@@ -107,7 +110,16 @@ android {
             useLegacyPackaging = true
         }
     }
+    // The app's demoFull source set adds verified payloads; shared assets stay small for every variant.
+    sourceSets.getByName("main").assets.setSrcDirs(listOf(layout.buildDirectory.dir("thinAssets")))
 }
+
+val prepareThinAssets by tasks.registering(Sync::class) {
+    from("src/androidMain/assets")
+    exclude("**/*.onnx", "**/*.gguf")
+    into(layout.buildDirectory.dir("thinAssets"))
+}
+tasks.named("preBuild").configure { dependsOn(prepareThinAssets) }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     kotlinOptions {

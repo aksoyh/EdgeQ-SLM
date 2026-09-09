@@ -2,8 +2,11 @@ package com.aksoyapps.edgeqslm.photos
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.aksoyapps.edgeqslm.photos.embedding.SemanticEmbeddingContract
+import com.aksoyapps.edgeqslm.photos.embedding.SemanticEmbeddingRecord
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -11,7 +14,8 @@ import java.nio.ByteOrder
  * Photo metadata and embeddings storage using SQLite
  * Uses simple LIKE query for text search (FTS5 not available on all devices)
  */
-class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
+class PhotoVectorStore(context: Context, databaseName: String = DATABASE_NAME) :
+    SQLiteOpenHelper(context.applicationContext, databaseName, null, DATABASE_VERSION), SemanticIndexStore, SemanticSearchStore {
     
     override fun onCreate(db: SQLiteDatabase) {
         // Scan folders table - each folder has its own set of indexed photos
@@ -43,6 +47,11 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
                 vlm_description TEXT,
                 vlm_tags TEXT,
                 vlm_indexed_at INTEGER,
+                semantic_source TEXT,
+                semantic_core_version TEXT,
+                semantic_embedding BLOB,
+                semantic_embedding_space TEXT,
+                semantic_embedding_version TEXT,
                 UNIQUE(folder_id, file_path),
                 FOREIGN KEY (folder_id) REFERENCES scan_folders(id)
             )
@@ -58,11 +67,19 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
     }
     
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Migration from version 3 to 4: Add scan_folders table
+        val columns = photoColumns(db).toMutableSet()
+        val requiredLegacyColumns = setOf(
+            "id", "file_path", "file_name", "date_taken", "width", "height", "ocr_text",
+            "image_embedding", "text_embedding", "indexed_at", "file_modified"
+        )
+        check(columns.containsAll(requiredLegacyColumns)) { "Unsupported photo schema: missing legacy columns" }
+
+        fun addColumn(name: String, declaration: String) {
+            if (columns.add(name)) db.execSQL("ALTER TABLE photos ADD COLUMN $name $declaration")
+        }
+
         if (oldVersion < 4) {
-            try {
-                // Create scan_folders table
-                db.execSQL("""
+            db.execSQL("""
                     CREATE TABLE IF NOT EXISTS scan_folders (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         folder_path TEXT UNIQUE NOT NULL,
@@ -70,31 +87,42 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
                         created_at INTEGER NOT NULL,
                         last_indexed_at INTEGER
                     )
-                """)
-                db.execSQL("CREATE INDEX IF NOT EXISTS idx_folders_path ON scan_folders(folder_path)")
-                
-                // Add folder_id column (default to 1 for existing data)
-                db.execSQL("ALTER TABLE photos ADD COLUMN folder_id INTEGER DEFAULT 1")
-                db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id)")
-                
-                android.util.Log.i("PhotoVectorStore", "Migrated to version 4 with scan_folders")
-            } catch (e: Exception) {
-                android.util.Log.w("PhotoVectorStore", "Migration v4: ${e.message}")
-            }
+            """)
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_folders_path ON scan_folders(folder_path)")
+            addColumn("folder_id", "INTEGER DEFAULT 1")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id)")
         }
-        
-        // Handle VLM columns (from v2 to v3)
+
         if (oldVersion < 3) {
-            try {
-                db.execSQL("ALTER TABLE photos ADD COLUMN vlm_description TEXT")
-                db.execSQL("ALTER TABLE photos ADD COLUMN vlm_tags TEXT")
-                db.execSQL("ALTER TABLE photos ADD COLUMN vlm_indexed_at INTEGER")
-                db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_vlm_tags ON photos(vlm_tags)")
-            } catch (e: Exception) {
-                android.util.Log.w("PhotoVectorStore", "Migration v3: ${e.message}")
+            addColumn("vlm_description", "TEXT")
+            addColumn("vlm_tags", "TEXT")
+            addColumn("vlm_indexed_at", "INTEGER")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_vlm_tags ON photos(vlm_tags)")
+        }
+
+        if (oldVersion < 5) {
+            check(columns.containsAll(setOf("folder_id", "vlm_description", "vlm_tags", "vlm_indexed_at"))) {
+                "Unsupported photo schema: missing v4 columns"
             }
+            addColumn("semantic_source", "TEXT")
+        }
+        if (oldVersion < 6) {
+            check(columns.containsAll(setOf("folder_id", "vlm_description", "vlm_tags", "vlm_indexed_at", "semantic_source"))) {
+                "Unsupported photo schema: missing v5 columns"
+            }
+            addColumn("semantic_core_version", "TEXT")
+            addColumn("semantic_embedding", "BLOB")
+            addColumn("semantic_embedding_space", "TEXT")
+            addColumn("semantic_embedding_version", "TEXT")
         }
     }
+
+    private fun photoColumns(db: SQLiteDatabase): Set<String> =
+        db.rawQuery("PRAGMA table_info(photos)", null).use { cursor ->
+            buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(cursor.getColumnIndexOrThrow("name")))
+            }
+        }
     
     /**
      * Insert or update a photo record
@@ -105,22 +133,188 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
             put("folder_id", photo.folderId)
             put("file_path", photo.filePath)
             put("file_name", photo.fileName)
-            put("date_taken", photo.dateTaken)
-            put("width", photo.width)
-            put("height", photo.height)
-            put("ocr_text", photo.ocrText)
-            put("image_embedding", photo.imageEmbedding?.toByteArray())
-            put("text_embedding", photo.textEmbedding?.toByteArray())
+            photo.dateTaken?.let { put("date_taken", it) }
+            photo.width?.let { put("width", it) }
+            photo.height?.let { put("height", it) }
+            photo.ocrText?.let { put("ocr_text", it) }
+            photo.imageEmbedding?.let { put("image_embedding", it.toByteArray()) }
+            photo.textEmbedding?.let { put("text_embedding", it.toByteArray()) }
             put("indexed_at", System.currentTimeMillis())
             put("file_modified", photo.fileModified)
-            if (photo.vlmDescription != null) {
-                put("vlm_description", photo.vlmDescription)
-                put("vlm_tags", photo.vlmTags)
-                put("vlm_indexed_at", System.currentTimeMillis())
+        }
+
+        db.beginTransaction()
+        try {
+            val existingId = db.rawQuery(
+                "SELECT id FROM photos WHERE folder_id = ? AND file_path = ? ORDER BY id LIMIT 1",
+                arrayOf(photo.folderId.toString(), photo.filePath)
+            ).use { if (it.moveToFirst()) it.getLong(0) else null }
+            val id = if (existingId != null) {
+                check(db.update("photos", values, "id = ?", arrayOf(existingId.toString())) == 1)
+                existingId
+            } else {
+                photo.vlmDescription?.let {
+                    values.put("vlm_description", it)
+                    values.put("vlm_indexed_at", System.currentTimeMillis())
+                }
+                photo.vlmTags?.let { values.put("vlm_tags", it) }
+                db.insertOrThrow("photos", null, values)
+            }
+            db.setTransactionSuccessful()
+            return id
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun getPhotoForVlm(id: Long): PhotoRecord? = readableDatabase.query(
+        "photos", VLM_SOURCE_COLUMNS, "id = ?", arrayOf(id.toString()), null, null, null
+    ).use { if (it.moveToFirst()) it.toVlmPhoto() else null }
+
+    fun getPhotoForVlmPath(path: String): PhotoRecord? = readableDatabase.query(
+        "photos", VLM_SOURCE_COLUMNS, "file_path = ?", arrayOf(path), null, null, "id ASC", "1"
+    ).use { if (it.moveToFirst()) it.toVlmPhoto() else null }
+
+    fun getVlmSourcePage(folderPath: String? = null, afterId: Long = 0, limit: Int = 64): List<PhotoRecord> {
+        require(afterId >= 0 && limit > 0)
+        val conditions = if (folderPath == null) "id > ?" else "id > ? AND file_path LIKE ? ESCAPE '\\'"
+        val args = if (folderPath == null) arrayOf(afterId.toString()) else {
+            val prefix = folderPath.trimEnd('/') + "/"
+            val escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            arrayOf(afterId.toString(), "$escaped%")
+        }
+        return readableDatabase.query(
+            "photos", VLM_SOURCE_COLUMNS, conditions, args, null, null, "id ASC", limit.toString()
+        ).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.toVlmPhoto()) }
+        }
+    }
+
+    fun compareAndSetVlmSource(
+        rowId: Long,
+        expectedFileModified: Long,
+        expectedSource: String?,
+        newSource: String,
+        description: String? = null,
+        tags: String? = null
+    ): Boolean {
+        val db = writableDatabase
+        val sourceCondition = if (expectedSource == null) "semantic_source IS NULL" else "semantic_source = ?"
+        val conditions = "id = ? AND file_modified = ? AND $sourceCondition"
+        val args = listOf(rowId.toString(), expectedFileModified.toString()).let {
+            if (expectedSource == null) it else it + expectedSource
+        }.toTypedArray()
+
+        db.beginTransaction()
+        try {
+            val previous = db.query(
+                "photos", arrayOf("vlm_description", "vlm_tags"), conditions, args, null, null, null
+            ).use { cursor ->
+                if (cursor.moveToFirst()) Pair(cursor.getString(0), cursor.getString(1)) else null
+            } ?: return false
+            val values = ContentValues().apply {
+                put("semantic_source", newSource)
+                if (newSource != expectedSource) SEMANTIC_EMBEDDING_COLUMNS.forEach(::putNull)
+                if (description != null && previous.first.isNullOrBlank()) put("vlm_description", description)
+                if (!tags.isNullOrBlank()) {
+                    val oldTags = previous.second
+                    put("vlm_tags", when {
+                        oldTags.isNullOrBlank() -> tags
+                        oldTags.contains(tags) -> oldTags
+                        else -> "$oldTags\n$tags"
+                    })
+                }
+                if (description != null || tags != null) put("vlm_indexed_at", System.currentTimeMillis())
+            }
+            val updated = db.update("photos", values, conditions, args)
+            check(updated <= 1) { "VLM source write affected multiple rows" }
+            db.setTransactionSuccessful()
+            return updated == 1
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun Cursor.toVlmPhoto(): PhotoRecord = PhotoRecord(
+        id = getLong(0),
+        folderId = getLong(1),
+        filePath = getString(2),
+        fileName = getString(3),
+        dateTaken = if (isNull(4)) null else getLong(4),
+        width = if (isNull(5)) null else getInt(5),
+        height = if (isNull(6)) null else getInt(6),
+        ocrText = getString(7),
+        fileModified = getLong(8),
+        vlmDescription = getString(9),
+        vlmTags = getString(10),
+        semanticSource = getString(11)
+    )
+
+    override fun getSemanticSourcePage(folderPath: String?, afterId: Long, limit: Int): List<SemanticIndexRow> {
+        require(afterId >= 0 && limit in 1..64)
+        val conditions = if (folderPath == null) "id > ?" else "id > ? AND file_path LIKE ? ESCAPE '\\'"
+        val args = if (folderPath == null) arrayOf(afterId.toString()) else {
+            val prefix = (folderPath.trimEnd('/') + "/").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            arrayOf(afterId.toString(), "$prefix%")
+        }
+        return readableDatabase.query(
+            "photos", arrayOf("id", "file_modified", "semantic_source") + SEMANTIC_EMBEDDING_COLUMNS,
+            conditions, args, null, null, "id ASC", limit.toString(),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(SemanticIndexRow(
+                    id = cursor.getLong(0), fileModified = cursor.getLong(1), source = cursor.getString(2),
+                    embedding = SemanticEmbeddingRecord(
+                        coreVersion = cursor.getString(3), blob = if (cursor.isNull(4)) null else cursor.getBlob(4),
+                        space = cursor.getString(5), encoderVersion = cursor.getString(6),
+                    ),
+                ))
             }
         }
-        
-        return db.insertWithOnConflict("photos", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    override fun compareAndSetSemanticEmbedding(row: SemanticIndexRow, embedding: SemanticEmbeddingRecord): Boolean {
+        require(row.currentSource()?.currentProjection?.isEligible == true) {
+            "Semantic writes require current eligible search projection"
+        }
+        val source = requireNotNull(row.source)
+        // Re-encode a defensive snapshot after boundary validation before passing bytes to SQLite.
+        val validated = SemanticEmbeddingContract.encode(SemanticEmbeddingContract.decode(embedding, source), source)
+        val values = ContentValues().apply {
+            put("semantic_core_version", validated.coreVersion)
+            put("semantic_embedding", validated.blob)
+            put("semantic_embedding_space", validated.space)
+            put("semantic_embedding_version", validated.encoderVersion)
+        }
+        return writableDatabase.update(
+            "photos", values, "id = ? AND file_modified = ? AND semantic_source = ?",
+            arrayOf(row.id.toString(), row.fileModified.toString(), source),
+        ) == 1
+    }
+
+    override fun getSemanticSearchPage(afterId: Long, limit: Int): List<SemanticSearchRow> {
+        require(afterId >= 0 && limit in 1..64)
+        // Reject oversized/type-invalid blobs before they can exhaust an Android CursorWindow.
+        return readableDatabase.rawQuery("""
+            SELECT id, file_modified, semantic_source, semantic_core_version,
+                   CASE WHEN typeof(semantic_embedding) = 'blob' AND length(semantic_embedding) = 1536
+                        THEN semantic_embedding ELSE NULL END,
+                   semantic_embedding_space, semantic_embedding_version, file_path, file_name
+            FROM photos WHERE id > ? ORDER BY id ASC LIMIT ?
+        """, arrayOf(afterId.toString(), limit.toString())).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(SemanticSearchRow(
+                    index = SemanticIndexRow(
+                        id = cursor.getLong(0), fileModified = cursor.getLong(1), source = cursor.getString(2),
+                        embedding = SemanticEmbeddingRecord(
+                            coreVersion = cursor.getString(3), blob = if (cursor.isNull(4)) null else cursor.getBlob(4),
+                            space = cursor.getString(5), encoderVersion = cursor.getString(6),
+                        ),
+                    ),
+                    filePath = cursor.getString(7), fileName = cursor.getString(8),
+                ))
+            }
+        }
     }
     
     /**
@@ -394,72 +588,48 @@ class PhotoVectorStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NA
     
     companion object {
         private const val DATABASE_NAME = "photo_index.db"
-        private const val DATABASE_VERSION = 4  // Bumped for scan_folders table
+        private const val DATABASE_VERSION = 6
+        private val SEMANTIC_EMBEDDING_COLUMNS = arrayOf(
+            "semantic_core_version", "semantic_embedding", "semantic_embedding_space", "semantic_embedding_version"
+        )
+        private val VLM_SOURCE_COLUMNS = arrayOf(
+            "id", "folder_id", "file_path", "file_name", "date_taken", "width", "height",
+            "ocr_text", "file_modified", "vlm_description", "vlm_tags", "semantic_source"
+        )
     }
     
     /**
-     * Search VLM descriptions for matching photos
+     * Load all indexed photos for SLM in-memory scoring
      */
-    fun searchVlmDescriptions(query: String, limit: Int = 50): List<PhotoSearchResult> {
+    fun getAllPhotosForSlm(limit: Int = 5000): List<PhotoRecord> {
         val db = readableDatabase
-        val searchTerms = query.lowercase().split(" ").filter { it.isNotBlank() && it.length > 1 }
-        
-        if (searchTerms.isEmpty()) return emptyList()
-        
-        // Build LIKE conditions for each search term in vlm_description and vlm_tags
-        val conditions = searchTerms.joinToString(" OR ") { 
-            "(LOWER(vlm_description) LIKE ? OR LOWER(vlm_tags) LIKE ? OR LOWER(file_name) LIKE ?)" 
-        }
-        val args = searchTerms.flatMap { 
-            listOf("%$it%", "%$it%", "%$it%") 
-        }.toTypedArray()
-        
         val cursor = db.rawQuery("""
-            SELECT id, file_path, file_name, vlm_description, vlm_tags
-            FROM photos 
-            WHERE vlm_description IS NOT NULL AND ($conditions)
+            SELECT id, file_path, file_name, ocr_text, semantic_source, file_modified
+            FROM photos
             LIMIT ?
-        """, args + limit.toString())
-        
-        val results = mutableListOf<PhotoSearchResult>()
+        """, arrayOf(limit.toString()))
+        val records = mutableListOf<PhotoRecord>()
         cursor.use {
             while (it.moveToNext()) {
-                val description = it.getString(3) ?: ""
-                val tags = it.getString(4) ?: ""
-                val fileName = it.getString(2)
-                
-                // Calculate relevance score
-                val matchedInDesc = searchTerms.count { term -> 
-                    description.lowercase().contains(term) 
+                val source = it.getString(4)?.let { value ->
+                    runCatching { StructuredSemanticSource.parsePersisted(value) }.getOrNull()
                 }
-                val matchedInTags = searchTerms.count { term -> 
-                    tags.lowercase().contains(term) 
-                }
-                val score = (matchedInDesc * 0.6f + matchedInTags * 0.4f) / searchTerms.size
-                
-                // Build match reason
-                val matchReason = buildString {
-                    if (matchedInTags > 0) append("Tags: $tags")
-                    else if (description.length > 80) append(description.take(80) + "...")
-                    else append(description)
-                }
-                
-                results.add(PhotoSearchResult(
+                val projectedText = source?.takeIf { value ->
+                    value.imageRevision.fileModified == it.getLong(5)
+                }?.currentProjection?.takeIf { projection -> projection.isEligible }?.coreText
+                records.add(PhotoRecord(
                     id = it.getLong(0),
-                    filePath = it.getString(1),
-                    fileName = fileName,
-                    ocrText = null,  // OCR text is separate
-                    score = score,
-                    matchType = "VLM",
-                    matchReason = matchReason,
-                    vlmDescription = description,
-                    vlmTags = tags
+                    filePath = it.getString(1) ?: "",
+                    fileName = it.getString(2) ?: "",
+                    ocrText = it.getString(3),
+                    vlmDescription = projectedText,
+                    vlmTags = projectedText
                 ))
             }
         }
-        return results.sortedByDescending { it.score }
+        return records
     }
-    
+
     /**
      * Get photos that don't have VLM descriptions yet, filtered by folder path
      */
@@ -655,7 +825,8 @@ data class PhotoRecord(
     val textEmbedding: FloatArray? = null,
     val fileModified: Long = 0,
     val vlmDescription: String? = null,
-    val vlmTags: String? = null
+    val vlmTags: String? = null,
+    val semanticSource: String? = null
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

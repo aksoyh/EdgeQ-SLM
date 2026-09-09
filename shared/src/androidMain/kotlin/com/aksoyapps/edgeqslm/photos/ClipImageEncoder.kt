@@ -4,6 +4,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
+import com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import java.nio.FloatBuffer
@@ -15,6 +16,7 @@ import java.io.File
  */
 class ClipImageEncoder(private val context: Context) {
     
+    private val diagnostics by lazy { ThesisDiagnostics.get(context) }
     private var ortEnv: OrtEnvironment? = null
     private var session: OrtSession? = null
     
@@ -30,21 +32,25 @@ class ClipImageEncoder(private val context: Context) {
      * @param modelPath Path to clip-vit-b32-image.onnx file
      */
     fun initialize(modelPath: String): Boolean {
+        val started = System.nanoTime()
+        diagnostics.modelState("clip_image", "loading")
         return try {
             ortEnv = OrtEnvironment.getEnvironment()
             
-            val sessionOptions = OrtSession.SessionOptions()
-            sessionOptions.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            OrtSession.SessionOptions().use { options ->
+                options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                session = ortEnv?.createSession(modelPath, options)
+            }
             
-            session = ortEnv?.createSession(modelPath, sessionOptions)
-            
-            android.util.Log.d("ClipImageEncoder", "Model loaded successfully from: $modelPath")
             android.util.Log.d("ClipImageEncoder", "Input: ${session?.inputNames}")
             android.util.Log.d("ClipImageEncoder", "Output: ${session?.outputNames}")
             
+            diagnostics.event("clip_image_load", mapOf("duration_ms" to (System.nanoTime() - started) / 1e6))
+            diagnostics.modelState("clip_image", "loaded")
             true
         } catch (e: Exception) {
             android.util.Log.e("ClipImageEncoder", "Failed to load model: ${e.message}", e)
+            diagnostics.modelState("clip_image", "load_failed")
             false
         }
     }
@@ -54,7 +60,7 @@ class ClipImageEncoder(private val context: Context) {
      */
     fun encode(imagePath: String): FloatArray? {
         val bitmap = BitmapFactory.decodeFile(imagePath) ?: return null
-        return encode(bitmap)
+        return try { encode(bitmap) } finally { bitmap.recycle() }
     }
     
     /**
@@ -63,27 +69,22 @@ class ClipImageEncoder(private val context: Context) {
     fun encode(bitmap: Bitmap): FloatArray? {
         val env = ortEnv ?: return null
         val sess = session ?: return null
+        val encodeStarted = System.nanoTime()
         
         try {
             // Preprocess image
-            val inputTensor = preprocessImage(bitmap, env)
-            
-            // Run inference
-            val inputs = mapOf("pixel_values" to inputTensor)
-            val results = sess.run(inputs)
-            
-            // Get output
-            val output = results[0].value as Array<FloatArray>
-            val embedding = output[0]
-            
-            inputTensor.close()
-            results.close()
-            
-            return embedding
+            return preprocessImage(bitmap, env).use { inputTensor ->
+                sess.run(mapOf("pixel_values" to inputTensor)).use { results ->
+                    val output = results[0].value as Array<FloatArray>
+                    output[0]
+                }
+            }
             
         } catch (e: Exception) {
             android.util.Log.e("ClipImageEncoder", "Inference error: ${e.message}", e)
             return null
+        } finally {
+            diagnostics.event("clip_image_encode", mapOf("duration_ms" to (System.nanoTime() - encodeStarted) / 1e6))
         }
     }
     
@@ -103,6 +104,7 @@ class ClipImageEncoder(private val context: Context) {
         // Extract pixels and normalize
         val pixels = IntArray(imageSize * imageSize)
         resized.getPixels(pixels, 0, imageSize, 0, 0, imageSize, imageSize)
+        if (resized !== bitmap) resized.recycle()
         
         // Convert to CHW format with normalization
         for (c in 0 until 3) {
@@ -148,9 +150,9 @@ class ClipImageEncoder(private val context: Context) {
     
     fun close() {
         session?.close()
-        ortEnv?.close()
         session = null
         ortEnv = null
+        diagnostics.modelState("clip_image", "closed")
     }
     
     companion object {

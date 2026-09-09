@@ -1,229 +1,224 @@
 package com.aksoyapps.edgeqslm.photos
 
-import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.isActive
 import kotlin.coroutines.coroutineContext
 
-/**
- * VLM Indexer - Pre-indexes photos with Vision LLM descriptions
- * 
- * This runs on IO dispatcher and can be paused/resumed.
- * If app is closed, indexing resumes from where it left off
- * (photos without vlm_description are re-processed).
- */
+/** Resumable structured-source indexing. A generation is attempted at most once per row per run. */
 class VlmIndexer(
-    private val vlmAnalyzer: VlmImageAnalyzer,
+    private val vlmAnalyzer: VlmSourceAnalyzer,
     private val vectorStore: PhotoVectorStore
 ) {
-    companion object {
-        private const val TAG = "VlmIndexer"
-        
-        // Updated prompt as requested (English)
-        private const val PROMPT_COMBINED = "Describe the objects in the image, extract the text written in the image."
-    }
-    
     /**
-     * Index all photos that don't have VLM descriptions yet in the specified folder
-     * Returns a Flow of progress updates
-     * @param force If true, clear existing VLM descriptions and re-index all photos
+     * Explicit starts can resume incomplete rows. Sticky service recovery processes only unattempted
+     * rows: it cannot know whether an interrupted native call already generated an answer.
+     * The legacy force control never erases data or resamples a current valid source.
      */
-    fun indexAllPhotos(folderPath: String? = null, force: Boolean = false): Flow<VlmIndexProgress> = flow {
-        // Clear existing data if force is true
-        if (force) {
-            Log.i(TAG, "Force indexing enabled, clearing VLM descriptions for folder: $folderPath")
-            emit(VlmIndexProgress(
-                current = 0,
-                total = 0,
-                failed = 0,
-                currentFile = "",
-                status = VlmIndexStatus.RUNNING,
-                message = "Clearing existing VLM index..."
-            ))
-            vectorStore.clearVlmDescriptions(folderPath)
-        }
-
-        val photosToIndex = vectorStore.getPhotosWithoutVlmDescription(folderPath = folderPath, limit = 1000)
-        val total = photosToIndex.size
-        Log.i(TAG, "Found $total photos to index (folder=$folderPath)")
-        
-        if (total == 0) {
-            emit(VlmIndexProgress(
-                current = 0,
-                total = 0,
-                failed = 0,
-                currentFile = "",
-                status = VlmIndexStatus.COMPLETED,
-                message = "All photos already indexed with VLM"
-            ))
-            return@flow
-        }
-        
-        Log.i(TAG, "Starting VLM indexing for $total photos")
-        
-        emit(VlmIndexProgress(
-            current = 0,
-            total = total,
-            failed = 0,
-            currentFile = "",
-            status = VlmIndexStatus.RUNNING,
-            message = "Starting VLM indexing..."
-        ))
-        
-        var indexed = 0
+    fun indexAllPhotos(
+        folderPath: String? = null,
+        force: Boolean = false,
+        resumeIncomplete: Boolean = true,
+        selectedPaths: Set<String>? = null,
+        onRow: (String) -> Unit = {},
+    ): Flow<VlmIndexProgress> = flow {
+        val total = selectedPaths?.size ?: vectorStore.getPhotoCount()
+        var completed = 0
         var failed = 0
-        
-        for (photo in photosToIndex) {
-            // Check if coroutine is still active
-            if (!coroutineContext.isActive) {
-                Log.i(TAG, "Indexing cancelled at $indexed/$total")
-                emit(VlmIndexProgress(
-                    current = indexed,
-                    total = total,
-                    failed = failed,
-                    currentFile = photo.fileName,
-                    status = VlmIndexStatus.CANCELLED,
-                    message = "Indexing cancelled"
-                ))
+        var afterId = 0L
+        while (true) {
+            coroutineContext.ensureActive()
+            val page = vectorStore.getVlmSourcePage(folderPath, afterId, 16)
+            if (page.isEmpty()) break
+            var storageFailed = false
+            vlmAnalyzer.withSession {
+                for (photo in page) {
+                    coroutineContext.ensureActive()
+                    if (selectedPaths != null && photo.filePath !in selectedPaths) continue
+                    val existing = parseSource(photo.semanticSource)
+                    if (!resumeIncomplete && !force && photo.semanticSource != null &&
+                        existing?.state != SemanticSourceState.VALID) {
+                        if (existing?.state == SemanticSourceState.IN_PROGRESS) {
+                            vectorStore.compareAndSetVlmSource(
+                                photo.id, photo.fileModified, photo.semanticSource,
+                                existing.copy(state = SemanticSourceState.INTERRUPTED,
+                                    errorCode = "process_interrupted").serialize()
+                            )
+                        }
+                        onRow(photo.filePath)
+                        continue
+                    }
+                    emit(VlmIndexProgress(completed, total, failed, photo.fileName,
+                        VlmIndexStatus.RUNNING, "Analyzing ${photo.fileName}"))
+                    val result = indexRow(photo.id, allowInference = resumeIncomplete || force ||
+                        photo.semanticSource == null)
+                    if (result.success) completed++ else failed++
+                    onRow(photo.filePath)
+                    emit(VlmIndexProgress(completed, total, failed, photo.fileName,
+                        VlmIndexStatus.RUNNING, result.error ?: "Source complete",
+                        result.latencyMs))
+                    if (result.error == "source_database_write_failed") {
+                        storageFailed = true
+                        break
+                    }
+                }
+            }
+            if (storageFailed) {
+                emit(VlmIndexProgress(completed, total, failed, "", VlmIndexStatus.ERROR,
+                    "Source database write failed; indexing stopped"))
                 return@flow
             }
-            
-            // Emit progress BEFORE processing
-            emit(VlmIndexProgress(
-                current = indexed,
-                total = total,
-                failed = failed,
-                currentFile = photo.fileName,
-                status = VlmIndexStatus.RUNNING,
-                message = "Analyzing ${indexed+1}/$total: ${photo.fileName}"
-            ))
-            
-            var latency: Long = 0
-            
-            try {
-                val result = indexSinglePhoto(photo.filePath)
-                latency = result.latencyMs
-                if (result.success) {
-                    indexed++
-                    Log.i(TAG, "Indexed: ${photo.fileName} | Desc: ${result.description.take(100)} | Tags: ${result.tags}")
-                } else {
-                    failed++
-                    Log.w(TAG, "Failed: ${photo.fileName} - ${result.error}")
-                }
-            } catch (e: Exception) {
-                failed++
-                Log.e(TAG, "Error indexing ${photo.fileName}: ${e.message}")
-            }
-            
-            // Emit progress AFTER processing
-            emit(VlmIndexProgress(
-                current = indexed,
-                total = total,
-                failed = failed,
-                currentFile = photo.fileName,
-                status = VlmIndexStatus.RUNNING,
-                message = "Done $indexed/$total (${failed} failed)",
-                latencyMs = latency,
-                imageSize = java.io.File(photo.filePath).length()
-            ))
+            afterId = page.last().id
         }
-        
-        Log.i(TAG, "VLM indexing completed: $indexed indexed, $failed failed")
-        
-        emit(VlmIndexProgress(
-            current = indexed,
-            total = total,
-            failed = failed,
-            currentFile = "",
-            status = VlmIndexStatus.COMPLETED,
-            message = "Completed: $indexed indexed, $failed failed"
-        ))
+        emit(VlmIndexProgress(completed, total, failed, "", VlmIndexStatus.COMPLETED,
+            "Completed: $completed current sources, $failed incomplete"))
     }.flowOn(Dispatchers.IO)
-    
-    /**
-     * Index a single photo with VLM - uses single combined prompt for speed
-     */
-    suspend fun indexSinglePhoto(photoPath: String): VlmIndexResult {
-        val startTime = System.currentTimeMillis()
-        
+
+    suspend fun indexSinglePhoto(photoPath: String): VlmIndexResult =
+        vlmAnalyzer.withSession {
+            val photo = vectorStore.getPhotoForVlmPath(photoPath)
+                ?: return@withSession failure("photo_not_indexed", 0)
+            indexRow(photo.id)
+        }
+
+    private suspend fun indexRow(rowId: Long, allowInference: Boolean = true): VlmIndexResult {
+        val start = System.currentTimeMillis()
+        val photo = vectorStore.getPhotoForVlm(rowId) ?: return failure("photo_not_indexed", start)
+        var expectedSource = photo.semanticSource
+        val previous = parseSource(expectedSource)
+        var imageRevision: ImageRevision? = null
+        var raw: String? = null
+        var imageTransform: VlmImageTransform? = null
+        var claimed = false
         try {
-            // First attempt: 128 tokens
-            var result = vlmAnalyzer.analyzeImage(photoPath, PROMPT_COMBINED, maxTokens = 128)
-            var response = result.description ?: ""
-            
-            // Retry logic: If response is too short or empty, try with 256 tokens
-            if (response.trim().length < 15) {
-                 Log.w(TAG, "Short/Empty response, retrying with 256 tokens: '$response'")
-                 result = vlmAnalyzer.analyzeImage(photoPath, PROMPT_COMBINED, maxTokens = 256)
-                 response = result.description ?: ""
+            coroutineContext.ensureActive()
+            imageRevision = VlmImageAnalyzer.imageRevision(photo.filePath)
+            if (previous?.isCurrent(imageRevision) == true) {
+                return VlmIndexResult(true, photo.vlmDescription.orEmpty(), photo.vlmTags.orEmpty(),
+                    System.currentTimeMillis() - start)
             }
-            
-            if (response.isBlank()) {
-                return VlmIndexResult(
-                    success = false,
-                    description = "",
-                    tags = "",
-                    latencyMs = System.currentTimeMillis() - startTime,
-                    error = "Empty VLM response"
+            // A source-envelope upgrade can reuse accepted raw output without any image inference.
+            val reusable = previous?.rawGeneration?.let {
+                runCatching { StructuredVisualSource.parseCurrent(it) }.getOrNull()
+            }
+            if (previous?.hasAcceptedInferenceContract() == true &&
+                previous.imageRevision == imageRevision && reusable != null) {
+                VlmSourceQuality.requireSearchableCandidate(reusable)
+                val source = StructuredSemanticSource(
+                    state = SemanticSourceState.VALID, imageRevision = imageRevision,
+                    rawGeneration = previous.rawGeneration, structured = reusable,
+                    imageTransform = previous.imageTransform
                 )
+                return commit(photo, expectedSource, source, start)
             }
-            
-            // Simple parsing - use response as description, extract keywords for tags
-            val description = response.trim().take(500)
-            
-            // Extract simple keywords from response for tags
-            val tags = response
-                .lowercase()
-                .replace(Regex("[^a-z0-9şçğüöı\\s]"), " ")
-                .split(Regex("\\s+"))
-                .filter { it.length > 2 }
-                .distinct()
-                .take(10)
-                .joinToString(",")
-            
-            // Save to database
-            vectorStore.updateVlmDescription(photoPath, description, tags)
-            
-            val latency = System.currentTimeMillis() - startTime
-            
-            return VlmIndexResult(
-                success = true,
-                description = description,
-                tags = tags,
-                latencyMs = latency,
-                error = null
+            if (!allowInference) return failure("explicit_resume_required", start)
+            val marker = if (previous?.structured != null) previous.asStale() else
+                StructuredSemanticSource(SemanticSourceState.IN_PROGRESS, imageRevision)
+            expectedSource = marker.serialize()
+            check(writeSource(
+                photo.id, photo.fileModified, photo.semanticSource, expectedSource
+            )) { "source_claim_conflict" }
+            claimed = true
+
+            val analysis = vlmAnalyzer.analyzeImage(photo.filePath)
+            raw = analysis.generation.text
+            imageTransform = analysis.imageTransform
+            coroutineContext.ensureActive()
+            val structured = StructuredVisualSource.parseCurrent(raw)
+            VlmSourceQuality.requireSearchableCandidate(structured)
+            check(VlmImageAnalyzer.imageRevision(photo.filePath) == imageRevision) {
+                "image_changed_during_inference"
+            }
+            val source = StructuredSemanticSource(
+                state = SemanticSourceState.VALID, imageRevision = imageRevision,
+                rawGeneration = raw, structured = structured, imageTransform = imageTransform
             )
-            
+            return commit(photo, expectedSource, source, start)
+        } catch (e: CancellationException) {
+            persistFailure(photo, expectedSource, previous, imageRevision, raw, claimed,
+                SemanticSourceState.INTERRUPTED, "indexing_cancelled", imageTransform)
+            throw e
         } catch (e: Exception) {
-            return VlmIndexResult(
-                success = false,
-                description = "",
-                tags = "",
-                latencyMs = System.currentTimeMillis() - startTime,
-                error = e.message
-            )
+            val error = e.message ?: e.javaClass.simpleName
+            persistFailure(photo, expectedSource, previous, imageRevision, raw, claimed,
+                if (error in setOf("image_exceeds_admission_limit", "image_source_safety_limit",
+                        "image_decode_budget_exceeded")) SemanticSourceState.DEFERRED
+                else SemanticSourceState.INVALID, error, imageTransform)
+            return failure(error, start)
         }
     }
-    
-    /**
-     * Check if VLM analyzer is available
-     */
-    fun isAvailable(): Boolean = vlmAnalyzer.isAvailable()
-    
-    /**
-     * Get indexing stats
-     */
-    fun getStats(): VlmIndexStats {
-        val total = vectorStore.getPhotoCount()
-        val indexed = vectorStore.getVlmIndexedCount()
-        return VlmIndexStats(
-            totalPhotos = total,
-            vlmIndexed = indexed,
-            remaining = total - indexed
+
+    private fun commit(
+        photo: PhotoRecord, expectedSource: String?, source: StructuredSemanticSource, start: Long
+    ): VlmIndexResult {
+        val structured = requireNotNull(source.structured)
+        check(writeSource(
+            photo.id, photo.fileModified, expectedSource, source.serialize(),
+            description = structured.semanticDescription, tags = structured.searchableText()
+        )) { "source_commit_conflict" }
+        val saved = vectorStore.getPhotoForVlm(photo.id) ?: error("source_row_disappeared")
+        return VlmIndexResult(true, saved.vlmDescription.orEmpty(), saved.vlmTags.orEmpty(),
+            System.currentTimeMillis() - start)
+    }
+
+    private fun persistFailure(
+        photo: PhotoRecord, expectedSource: String?, previous: StructuredSemanticSource?,
+        revision: ImageRevision?, raw: String?, claimed: Boolean,
+        state: SemanticSourceState, error: String, imageTransform: VlmImageTransform?
+    ) {
+        if (!claimed || revision == null) return
+        // Retain the last complete structured source when a replacement attempt fails.
+        val failed = if (previous?.structured != null)
+            previous.asStale().copy(errorCode = error)
+        else StructuredSemanticSource(state, revision, rawGeneration = raw, errorCode = error,
+            imageTransform = imageTransform)
+        try {
+            vectorStore.compareAndSetVlmSource(
+                photo.id, photo.fileModified, expectedSource, failed.serialize()
+            )
+        } catch (_: Exception) {
+            // The durable claim remains incomplete when SQLite itself is unavailable.
+        }
+    }
+
+    private fun writeSource(
+        rowId: Long, expectedFileModified: Long, expectedSource: String?, newSource: String,
+        description: String? = null, tags: String? = null
+    ): Boolean = try {
+        vectorStore.compareAndSetVlmSource(
+            rowId, expectedFileModified, expectedSource, newSource, description, tags
         )
+    } catch (e: Exception) {
+        throw IllegalStateException("source_database_write_failed", e)
+    }
+
+    private fun parseSource(value: String?): StructuredSemanticSource? =
+        value?.let { runCatching { StructuredSemanticSource.parsePersisted(it) }.getOrNull() }
+
+    private fun failure(error: String, start: Long) = VlmIndexResult(
+        false, "", "", if (start == 0L) 0 else System.currentTimeMillis() - start, error
+    )
+
+    fun isAvailable(): Boolean = vlmAnalyzer.isAvailable()
+
+    fun getStats(): VlmIndexStats {
+        var afterId = 0L
+        var indexed = 0
+        while (true) {
+            val page = vectorStore.getVlmSourcePage(null, afterId, 64)
+            if (page.isEmpty()) break
+            indexed += page.count { photo ->
+                val source = parseSource(photo.semanticSource)
+                source?.isCurrent(source.imageRevision) == true &&
+                    source.imageRevision.fileModified == photo.fileModified
+            }
+            afterId = page.last().id
+        }
+        val total = vectorStore.getPhotoCount()
+        return VlmIndexStats(total, indexed, total - indexed)
     }
 }
 

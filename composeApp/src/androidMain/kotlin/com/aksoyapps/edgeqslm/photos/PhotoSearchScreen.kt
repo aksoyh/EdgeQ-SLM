@@ -31,9 +31,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.compose.foundation.gestures.detectTapGestures
 import coil.compose.AsyncImage
 import java.io.File
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
+import com.aksoyapps.edgeqslm.R
 
 /**
  * Photo Search Screen with real image loading using Coil
@@ -44,16 +46,19 @@ fun PhotoSearchScreen(
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
     onStartIndexing: () -> Unit,
-    onForceIndexing: () -> Unit,
-    onVlmIndex: () -> Unit,
-    onForceVlmIndex: () -> Unit,
-    onCancelVlmIndex: () -> Unit,
+    onResumeIndexing: () -> Unit,
+    onStopIndexing: () -> Unit,
     onRefresh: () -> Unit,
     onTabChange: (Int) -> Unit,
-    onPhotoClick: (String) -> Unit,
     onClearError: () -> Unit,
     onSelectFolder: () -> Unit,
-    onSearchModeChange: (SearchMode) -> Unit,
+    onThesisModeChange: (ThesisSearchMode) -> Unit,
+    onRandomSample: (Int) -> Unit,
+    onResetSelection: () -> Unit,
+    sourceExpanded: Boolean,
+    onSourceExpandedChange: (Boolean) -> Unit,
+    onOpenModels: () -> Unit,
+    onCompleteMissingChannels: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var selectedPhoto by remember { mutableStateOf<PhotoSearchResultUi?>(null) }
@@ -62,26 +67,22 @@ fun PhotoSearchScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(brush = Brush.verticalGradient(colors = listOf(Color(0xFF0D1117), Color(0xFF161B22))))
+            .background(MaterialTheme.colorScheme.background)
             .verticalScroll(scrollState)
             .padding(16.dp)
     ) {
         Text(
-            text = "📷 Photo Search",
+            text = stringResource(R.string.photo_search),
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
-            color = Color.White,
+            color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.padding(bottom = 8.dp)
         )
         
-        StatusCard(uiState, onStartIndexing, onForceIndexing, onVlmIndex, onForceVlmIndex, onCancelVlmIndex, onRefresh, onSelectFolder, onSearchModeChange)
-        
-        Spacer(modifier = Modifier.height(12.dp))
-        
         TabRow(
             selectedTabIndex = uiState.selectedTab,
-            containerColor = Color(0xFF21262D),
-            contentColor = Color.White
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurface
         ) {
             Tab(selected = uiState.selectedTab == 0, onClick = { onTabChange(0) }) {
                 Text("📁 Files (${uiState.photoFiles.size})", modifier = Modifier.padding(12.dp))
@@ -92,19 +93,37 @@ fun PhotoSearchScreen(
         }
         
         Spacer(modifier = Modifier.height(12.dp))
-        
-        when (uiState.selectedTab) {
-            0 -> PhotoFilesListScrollable(uiState.photoFiles, onPhotoClick)
-            1 -> SearchTabScrollable(uiState, onQueryChange, onSearch) { selectedPhoto = it }
-        }
-        
+
+        StatusCard(uiState, onStartIndexing, onResumeIndexing, onStopIndexing, onRefresh,
+            onSelectFolder, onThesisModeChange, onRandomSample, onResetSelection,
+            sourceExpanded, onSourceExpandedChange, onOpenModels, onCompleteMissingChannels)
+
         uiState.error?.let { error ->
             Snackbar(
                 modifier = Modifier.padding(top = 8.dp),
-                action = { TextButton(onClick = onClearError) { Text("OK", color = Color.White) } },
-                containerColor = Color(0xFFDA3633)
-            ) { Text(error, color = Color.White) }
+                action = { TextButton(onClick = onClearError) { Text("OK") } },
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            ) { Text(error) }
         }
+        Spacer(modifier = Modifier.height(12.dp))
+        
+        when (uiState.selectedTab) {
+            0 -> PhotoFilesListScrollable(uiState.photoFiles) { file ->
+                selectedPhoto = PhotoSearchResultUi(
+                    id = file.path.hashCode().toLong(),
+                    filePath = file.path,
+                    fileName = file.name,
+                    ocrText = null,
+                    score = 0f,
+                    thumbnailUri = "file://${file.path}",
+                    matchType = MatchType.OCR,
+                    matchReason = ""
+                )
+            }
+            1 -> SearchTabScrollable(uiState, onQueryChange, onSearch) { selectedPhoto = it }
+        }
+        
     }
     
     selectedPhoto?.let { photo ->
@@ -129,7 +148,7 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
         Card(
             modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f),
             shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF21262D))
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
             Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                 Row(
@@ -141,13 +160,13 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                         text = photo.fileName,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
                     TextButton(onClick = onDismiss) {
-                        Text("✕", fontSize = 18.sp, color = Color(0xFF8B949E))
+                        Text("✕", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
                 
@@ -176,7 +195,7 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                                 .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
-                            Text("👆 Tap for fullscreen", fontSize = 10.sp, color = Color.White)
+                            Text("👆 Tap for fullscreen", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
                         }
                     }
                 }
@@ -190,7 +209,7 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                         .background(Color(0xFF238636), RoundedCornerShape(8.dp))
                         .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
-                    Text("Match: ${(photo.score * 100).toInt()}%", fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("Ranking score: ${"%.4f".format(photo.score)}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
                 }
                 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -202,7 +221,7 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                 Card(
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     shape = RoundedCornerShape(8.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF161B22))
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                 ) {
                     Column(
                         modifier = Modifier
@@ -215,9 +234,9 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                         Spacer(modifier = Modifier.height(4.dp))
                         val vlmDesc = photo.vlmDescription
                         if (vlmDesc.isNullOrBlank()) {
-                            Text("Not indexed with VLM", fontSize = 13.sp, color = Color(0xFF6E7681))
+                            Text("Not indexed with VLM", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         } else {
-                            Text(vlmDesc, fontSize = 13.sp, color = Color.White, lineHeight = 18.sp)
+                            Text(vlmDesc, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, lineHeight = 18.sp)
                         }
                         
                         Spacer(modifier = Modifier.height(12.dp))
@@ -227,7 +246,7 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                         Spacer(modifier = Modifier.height(4.dp))
                         val vlmTags = photo.vlmTags
                         if (vlmTags.isNullOrBlank()) {
-                            Text("No tags", fontSize = 13.sp, color = Color(0xFF6E7681))
+                            Text("No tags", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         } else {
                             Text(vlmTags, fontSize = 13.sp, color = Color(0xFFE879F9), lineHeight = 18.sp)
                         }
@@ -239,9 +258,9 @@ private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit)
                         Spacer(modifier = Modifier.height(4.dp))
                         val ocrText = photo.ocrText
                         if (ocrText.isNullOrBlank()) {
-                            Text("No text detected", fontSize = 13.sp, color = Color(0xFF6E7681))
+                            Text("No text detected", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         } else {
-                            Text(ocrText, fontSize = 13.sp, color = Color.White, lineHeight = 18.sp)
+                            Text(ocrText, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, lineHeight = 18.sp)
                         }
                         
                         Spacer(modifier = Modifier.height(12.dp))
@@ -309,7 +328,7 @@ private fun FullscreenImageViewer(
                     .padding(16.dp)
                     .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
             ) {
-                Text("✕", fontSize = 24.sp, color = Color.White)
+                Text("✕", fontSize = 24.sp, color = MaterialTheme.colorScheme.onSurface)
             }
             
             // Zoom level indicator
@@ -320,7 +339,7 @@ private fun FullscreenImageViewer(
                     .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                Text("🔍 ${(scale * 100).toInt()}%", fontSize = 12.sp, color = Color.White)
+                Text("🔍 ${(scale * 100).toInt()}%", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
             }
             
             // Double-tap to reset
@@ -336,7 +355,7 @@ private fun FullscreenImageViewer(
                     }
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                Text("↺ Reset", fontSize = 12.sp, color = Color.White)
+                Text("↺ Reset", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
             }
         }
     }
@@ -345,210 +364,184 @@ private fun FullscreenImageViewer(
 @Composable
 private fun StatusCard(
     uiState: PhotoSearchUiState,
-    onStartIndexing: () -> Unit,
-    onForceIndexing: () -> Unit,
-    onVlmIndex: () -> Unit,
-    onForceVlmIndex: () -> Unit,
-    onCancelVlmIndex: () -> Unit,
+    onIndex: () -> Unit,
+    onResume: () -> Unit,
+    onCancel: () -> Unit,
     onRefresh: () -> Unit,
-    onSelectFolder: () -> Unit,
-    onSearchModeChange: (SearchMode) -> Unit
+    onChoose: () -> Unit,
+    onMode: (ThesisSearchMode) -> Unit,
+    onRandom: (Int) -> Unit,
+    onReset: () -> Unit,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onOpenModels: () -> Unit,
+    onCompleteMissing: () -> Unit,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF21262D)),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = "📂 ${uiState.scanFolderPath.substringAfterLast("/")}",
-                    fontSize = 12.sp,
-                    color = Color(0xFF8B949E),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = onSelectFolder, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
-                    Text("📁 Select", fontSize = 11.sp, color = Color(0xFF58A6FF))
+    var showSample by remember { mutableStateOf(false) }
+    var showThesis by remember { mutableStateOf(false) }
+    var showModeDetails by remember { mutableStateOf(false) }
+    var modeExpanded by remember { mutableStateOf(false) }
+    val busy = uiState.isIndexing || uiState.isSelectingPhotos || uiState.isIndexingPreflight
+    val modeUnavailable = uiState.thesisMode !in uiState.enabledThesisModes
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            TextButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.fillMaxWidth()) {
+                Text("${if (expanded) "▾" else "▸"} Indexing & Source", style = MaterialTheme.typography.titleSmall)
+            }
+            Text("${uiState.totalPhotos} selected · ${uiState.searchableCount} searchable · ${uiState.partiallyIndexedCount} partial",
+                style = MaterialTheme.typography.bodySmall)
+            if (uiState.isIndexing || uiState.isIndexingPreflight || uiState.isSelectingPhotos) {
+                if (uiState.isIndexing) LinearProgressIndicator(progress = { uiState.indexingProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                else LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text(when {
+                    uiState.isSelectingPhotos -> "Preparing local photo selection…"
+                    uiState.isIndexingPreflight -> "Checking models and selected photos…"
+                    else -> uiState.indexingMessage
+                }, style = MaterialTheme.typography.bodySmall)
+                if (uiState.isIndexing) {
+                    Text("Photo ${uiState.indexingProcessed}/${uiState.indexingTotal} · ${uiState.indexingStage} · ${elapsedTime(uiState.indexingElapsedMs)}", style = MaterialTheme.typography.labelSmall)
+                    Text("App RSS ${runtimeMiB(uiState.indexingRssMiB)} · sampled peak ${runtimeMiB(uiState.indexingPeakRssMiB)} · failed ${uiState.indexingFailedPhotos} · unavailable ${uiState.indexingUnavailablePhotos}",
+                        style = MaterialTheme.typography.labelSmall)
+                    TextButton(onClick = onCancel) { Text("Pause / cancel") }
                 }
             }
-            
-            Spacer(modifier = Modifier.height(6.dp))
-            
-            // Search Mode Toggle
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Mode:", fontSize = 12.sp, color = Color(0xFF8B949E))
-                
-                // ML Mode Button
-                val isMlMode = uiState.searchMode == SearchMode.ML_BASED
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (isMlMode) Color(0xFF58A6FF) else Color(0xFF30363D))
-                        .clickable { onSearchModeChange(SearchMode.ML_BASED) }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        "🔬 ML (CLIP+OCR)",
-                        fontSize = 11.sp,
-                        color = if (isMlMode) Color.White else Color(0xFF8B949E),
-                        fontWeight = if (isMlMode) FontWeight.Bold else FontWeight.Normal
-                    )
+            if (uiState.indexingBlockReason.isNotBlank()) Text(uiState.indexingBlockReason,
+                color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            if (modeUnavailable) {
+                Text("${if (uiState.thesisMode == ThesisSearchMode.RECOMMENDED) "Recommended mode" else uiState.thesisMode.displayLabel()} is not ready. Install required models and finish indexing.",
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = onOpenModels, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Download models") }
+                    TextButton(onClick = if (uiState.canCompleteMissingChannels) onCompleteMissing else onIndex,
+                        enabled = !busy && (uiState.canCompleteMissingChannels || uiState.totalPhotos > 0), modifier = Modifier.weight(1f)) { Text("Complete indexing") }
+                    TextButton(onClick = { showModeDetails = true }, modifier = Modifier.weight(1f)) { Text("Details") }
                 }
-                
-                // VLM Mode Button
-                val isVlmMode = uiState.searchMode == SearchMode.VLM_BASED
-                val vlmEnabled = uiState.isVlmAvailable
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(
-                            when {
-                                isVlmMode -> Color(0xFF8957E5)  // Purple for Vision LLM
-                                vlmEnabled -> Color(0xFF30363D)
-                                else -> Color(0xFF21262D)  // Dimmed when unavailable
-                            }
-                        )
-                        .clickable(enabled = vlmEnabled) { onSearchModeChange(SearchMode.VLM_BASED) }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        "🧠 VLM" + if (!vlmEnabled) " ⚠️" else "",
-                        fontSize = 11.sp,
-                        color = when {
-                            isVlmMode -> Color.White
-                            vlmEnabled -> Color(0xFF8B949E)
-                            else -> Color(0xFF6E7681)  // Dimmed
-                        },
-                        fontWeight = if (isVlmMode) FontWeight.Bold else FontWeight.Normal
-                    )
-                }
+            } else if (uiState.canCompleteMissingChannels && !busy) {
+                TextButton(onClick = onCompleteMissing) { Text("Complete missing channels") }
             }
-            
-            Spacer(modifier = Modifier.height(6.dp))
-            
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                Text("✅ ${uiState.indexedCount}/${uiState.totalPhotos} indexed", fontSize = 14.sp, color = Color(0xFF3FB950), fontWeight = FontWeight.Medium)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (uiState.isModelLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(14.dp),
-                            strokeWidth = 2.dp,
-                            color = Color(0xFFD29922)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
+            if (expanded) {
+                HorizontalDivider()
+                Text(uiState.sourceLabel, style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(onClick = onChoose, enabled = !busy, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.choose_photos))
                     }
-                    Text(
-                        uiState.modelLoadingMessage, 
-                        fontSize = 11.sp, 
-                        color = if (uiState.isModelLoading) Color(0xFFD29922) else Color(0xFF8B949E)
-                    )
-                }
-            }
-            
-            if (uiState.isIndexing) {
-                Spacer(modifier = Modifier.height(8.dp))
-                LinearProgressIndicator(
-                    progress = { uiState.indexingProgress },
-                    modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
-                    color = Color(0xFF58A6FF),
-                    trackColor = Color(0xFF30363D)
-                )
-                Text(uiState.indexingMessage, fontSize = 11.sp, color = Color(0xFF8B949E), modifier = Modifier.padding(top = 4.dp))
-            }
-            
-            if (!uiState.isIndexing) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(36.dp)) {
-                    // Force Indexing button with long-press
-                    ForceIndexButton(
-                        onNormalClick = onStartIndexing,
-                        onForceIndex = onForceIndexing,
-                        modifier = Modifier.weight(1f).fillMaxHeight()
-                    )
-                    OutlinedButton(
-                        onClick = onRefresh, 
-                        modifier = Modifier.weight(1f).fillMaxHeight(), 
-                        contentPadding = PaddingValues(8.dp), 
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF58A6FF))
-                    ) {
-                        Text("🔃 Refresh", fontSize = 12.sp)
+                    OutlinedButton(onClick = { showSample = true }, enabled = !busy, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.random_gallery_sample))
                     }
                 }
-                
-                // VLM Indexing section
-                if (uiState.isVlmAvailable) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    // VLM Index Progress
-                    if (uiState.isVlmIndexing) {
-                        Column {
-                            LinearProgressIndicator(
-                                progress = { uiState.vlmIndexProgress },
-                                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
-                                color = Color(0xFF8957E5),
-                                trackColor = Color(0xFF30363D)
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    uiState.vlmIndexMessage, 
-                                    fontSize = 11.sp, 
-                                    color = Color(0xFF8B949E)
-                                )
-                                TextButton(
-                                    onClick = onCancelVlmIndex,
-                                    contentPadding = PaddingValues(horizontal = 8.dp)
-                                ) {
-                                    Text("Cancel", fontSize = 11.sp, color = Color(0xFFF85149))
-                                }
-                            }
-                        }
-                    } else {
-                        // VLM Index Button
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            ForceVlmIndexButton(
-                                onNormalClick = onVlmIndex,
-                                onForceIndex = onForceVlmIndex,
-                                modifier = Modifier.weight(1f).height(36.dp)
-                            )
-                            Text(
-                                "${uiState.vlmIndexedCount} indexed",
-                                fontSize = 11.sp,
-                                color = Color(0xFF8B949E)
-                            )
+                Text("Full ${uiState.fullyIndexedCount} · failed/unavailable ${uiState.failedUnavailableCount} · existing index ${uiState.existingIndexCount}", style = MaterialTheme.typography.labelSmall)
+                Text(uiState.coverageSummary, style = MaterialTheme.typography.labelSmall)
+                if (uiState.missingChannelSummary.isNotBlank()) Text(uiState.missingChannelSummary, style = MaterialTheme.typography.bodySmall)
+                Text("New selections need indexing. Existing compatible indexes remain searchable.", style = MaterialTheme.typography.bodySmall)
+                if (!uiState.isIndexing) {
+                    Button(onClick = onIndex, enabled = !busy && uiState.totalPhotos > 0, modifier = Modifier.fillMaxWidth()) {
+                        Text("Index available channels")
+                    }
+                    if (uiState.indexingMessage.isNotBlank()) Text(uiState.indexingMessage, style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = onResume, enabled = uiState.canResumeIndexing && !busy) { Text("Resume") }
+                        TextButton(onClick = onRefresh, enabled = !busy) { Text("Refresh") }
+                        TextButton(onClick = onReset, enabled = !busy && uiState.totalPhotos > 0) { Text("Reset selection") }
+                    }
+                }
+                Box {
+                    OutlinedButton(onClick = { modeExpanded = true }, enabled = !uiState.isSearching && !uiState.isIndexingPreflight) {
+                        Text("Mode: ${uiState.thesisMode.displayLabel()}")
+                    }
+                    DropdownMenu(expanded = modeExpanded, onDismissRequest = { modeExpanded = false }) {
+                        ThesisSearchMode.values().forEach { mode ->
+                            DropdownMenuItem(enabled = mode in uiState.enabledThesisModes,
+                                text = { Column {
+                                    Text(mode.displayLabel())
+                                    Text(uiState.modeReasons[mode] ?: "Checking models and index…", style = MaterialTheme.typography.labelSmall)
+                                } }, onClick = { onMode(mode); modeExpanded = false })
                         }
                     }
                 }
+                Text(uiState.modeReasons[uiState.thesisMode] ?: "Checking compatible models and index…", style = MaterialTheme.typography.bodySmall)
+                Text("Mode changes affect retrieval only. Completing channels reuses compatible work for this same photo set.", style = MaterialTheme.typography.labelSmall)
+                TextButton(onClick = { showThesis = true }) { Text(stringResource(R.string.thesis_configuration)) }
             }
         }
     }
+    if (showModeDetails) AlertDialog(onDismissRequest = { showModeDetails = false },
+        title = { Text("${uiState.thesisMode.displayLabel()} readiness") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(uiState.modeReasons[uiState.thesisMode] ?: "Model and coverage verification is still running.")
+            if (uiState.missingChannelSummary.isNotBlank()) Text(uiState.missingChannelSummary)
+            Text("Recommended keeps frozen k20 / legacy 75% / semantic 25%. No fallback is displayed as another mode.")
+        } }, confirmButton = { TextButton(onClick = { showModeDetails = false }) { Text("Close") } })
+    if (showThesis) ThesisConfigurationDialog { showThesis = false }
+    if (showSample) RandomSampleDialog(onDismiss = { showSample = false }, onSelect = { count ->
+        showSample = false
+        onRandom(count)
+    })
+}
+
+private fun runtimeMiB(value: Double?): String = value?.let {
+    "%.0f MiB".format(java.util.Locale.US, it)
+} ?: "Unavailable"
+
+private fun elapsedTime(value: Long?): String = value?.let {
+    val seconds = (it / 1000).coerceAtLeast(0)
+    "${seconds / 60}m ${seconds % 60}s"
+} ?: "Elapsed time unavailable"
+
+fun ThesisSearchMode.displayLabel(): String = when (this) {
+    ThesisSearchMode.RECOMMENDED -> "Recommended / Thesis Configuration"
+    ThesisSearchMode.VISUAL -> "Visual / CLIP"
+    ThesisSearchMode.SEMANTIC -> "Semantic"
+    ThesisSearchMode.HYBRID -> "Hybrid / Fusion"
+    ThesisSearchMode.OCR -> "OCR"
 }
 
 @Composable
-private fun PhotoFilesList(photos: List<PhotoFileUi>, onPhotoClick: (String) -> Unit) {
+fun ThesisConfigurationDialog(onDismiss: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Thesis configuration") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Semantic: Photo → LFM2.5-VL-450M Q5_K_M + matching Q8 projector → structured source → C_search_projection_v2 → paraphrase-MiniLM-L3-v2 (384d) → cosine retrieval.")
+            Text("Visual: Photo → verified CLIP image embedding; query → paired CLIP text encoder. OCR: independent ML Kit Latin text recognition.")
+            Text(ThesisConfiguration.RECOMMENDED_DESCRIPTION)
+            Text(ThesisConfiguration.FINAL_FINDING)
+            Text("Safe projection retains eligible object evidence. Activities/relations are quarantined. Semantic source may be unavailable; photos can remain searchable through CLIP/OCR. Small correlated corpus; no release-readiness or generalization claim.")
+            Text("Exact model versions, sizes and SHA-256 status are in Settings → Models. MiniLM is an embedding model; optional TinyLlama/legacy LLM models are not the thesis VLM.")
+        } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } })
+}
+
+@Composable
+private fun RandomSampleDialog(onDismiss: () -> Unit, onSelect: (Int) -> Unit) {
+    var count by remember { mutableStateOf("50") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Random gallery sample") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Only photos you allow are considered. A fixed sample is copied unchanged and stays selected until reset/reselect. No search or indexing starts automatically.")
+            Row {
+                listOf(10, 25, 50, 100).forEach { size ->
+                    TextButton(onClick = { count = size.toString() }) { Text(size.toString()) }
+                }
+            }
+            OutlinedTextField(value = count, onValueChange = { count = it.filter(Char::isDigit).take(4) },
+                label = { Text("Custom count (1–1000)") }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+        } }, confirmButton = {
+            TextButton(onClick = { count.toIntOrNull()?.let(onSelect) },
+                enabled = count.toIntOrNull() in 1..1000) { Text("Choose sample") }
+        }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+@Composable
+private fun PhotoFilesList(photos: List<PhotoFileUi>, onPhotoClick: (PhotoFileUi) -> Unit) {
     if (photos.isEmpty()) {
         Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("📭", fontSize = 40.sp)
                 Spacer(modifier = Modifier.height(12.dp))
-                Text("Enable 'All Files Access' in Settings\nthen tap Refresh", fontSize = 13.sp, color = Color(0xFF8B949E), textAlign = TextAlign.Center)
+                Text("Choose Photos or explicitly select a random gallery sample", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
             }
         }
         return
     }
-    
+
     LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         items(photos) { photo ->
             PhotoFileRow(photo, onPhotoClick)
@@ -557,18 +550,18 @@ private fun PhotoFilesList(photos: List<PhotoFileUi>, onPhotoClick: (String) -> 
 }
 
 @Composable
-private fun PhotoFilesListScrollable(photos: List<PhotoFileUi>, onPhotoClick: (String) -> Unit) {
+private fun PhotoFilesListScrollable(photos: List<PhotoFileUi>, onPhotoClick: (PhotoFileUi) -> Unit) {
     if (photos.isEmpty()) {
         Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("📭", fontSize = 40.sp)
                 Spacer(modifier = Modifier.height(12.dp))
-                Text("Enable 'All Files Access' in Settings\nthen tap Refresh", fontSize = 13.sp, color = Color(0xFF8B949E), textAlign = TextAlign.Center)
+                Text("Choose Photos or explicitly select a random gallery sample", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
             }
         }
         return
     }
-    
+
     // Use regular Column for scrollable parent compatibility
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         photos.forEach { photo ->
@@ -578,9 +571,9 @@ private fun PhotoFilesListScrollable(photos: List<PhotoFileUi>, onPhotoClick: (S
 }
 
 @Composable
-private fun PhotoFileRow(photo: PhotoFileUi, onPhotoClick: (String) -> Unit) {
+private fun PhotoFileRow(photo: PhotoFileUi, onPhotoClick: (PhotoFileUi) -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().background(Color(0xFF21262D), RoundedCornerShape(8.dp)).clickable { onPhotoClick(photo.path) }.padding(8.dp),
+        modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).clickable { onPhotoClick(photo) }.padding(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Thumbnail
@@ -596,14 +589,30 @@ private fun PhotoFileRow(photo: PhotoFileUi, onPhotoClick: (String) -> Unit) {
         Spacer(modifier = Modifier.width(10.dp))
         
         Column(modifier = Modifier.weight(1f)) {
-            Text(photo.name, fontSize = 13.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${photo.sizeKb} KB", fontSize = 10.sp, color = Color(0xFF8B949E))
+            Text(photo.name, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("${photo.sizeKb} KiB", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (photo.channelStates.isEmpty()) {
+                Text(if (photo.isIndexed) "Existing index · coverage not yet measured" else "Unindexed · unavailable to search",
+                    style = MaterialTheme.typography.labelSmall)
+            } else {
+                Text(photo.channelStates.entries.joinToString(" · ") { "${it.key}: ${it.value.lowercase().replace('_', ' ')}" },
+                    style = MaterialTheme.typography.labelSmall)
+                if (photo.channelStates["MiniLM vector"] != "SUCCESS" && photo.channelStates["CLIP"] == "SUCCESS") {
+                    Text("Semantic source unavailable — searchable via CLIP/OCR where available.", style = MaterialTheme.typography.labelSmall)
+                }
+            }
         }
         
         Box(
-            modifier = Modifier.background(if (photo.isIndexed) Color(0xFF238636) else Color(0xFF30363D), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 3.dp)
+            modifier = Modifier.background(if (photo.isIndexed) Color(0xFF238636) else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 3.dp)
         ) {
-            Text(if (photo.isIndexed) "✅" else "⏳", fontSize = 10.sp)
+            Text(when {
+                photo.channelStates.isNotEmpty() && photo.channelStates.values.all { it == "SUCCESS" } -> "Full"
+                listOf("OCR", "CLIP", "MiniLM vector").any { photo.channelStates[it] == "SUCCESS" } -> "Partial"
+                photo.channelStates.values.any { it != "NOT_INDEXED" } -> "Unavailable"
+                photo.isIndexed -> "Existing"
+                else -> "New"
+            }, fontSize = 10.sp)
         }
     }
 }
@@ -620,7 +629,7 @@ private fun SearchTab(
             value = uiState.searchQuery,
             onValueChange = onQueryChange,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Search text in photos...", color = Color(0xFF6E7681)) },
+            placeholder = { Text("Search indexed photos...", color = MaterialTheme.colorScheme.onSurfaceVariant) },
             leadingIcon = {
                 if (uiState.isSearching) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFF58A6FF), strokeWidth = 2.dp)
                 else Text("🔍", fontSize = 18.sp)
@@ -630,9 +639,9 @@ private fun SearchTab(
             keyboardActions = KeyboardActions(onSearch = { onSearch() }),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = Color(0xFF58A6FF),
-                unfocusedBorderColor = Color(0xFF30363D),
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
                 cursorColor = Color(0xFF58A6FF)
             ),
             shape = RoundedCornerShape(12.dp)
@@ -641,14 +650,14 @@ private fun SearchTab(
         Spacer(modifier = Modifier.height(12.dp))
         
         if (uiState.searchResults.isNotEmpty()) {
-            Text("Found ${uiState.searchResults.size} results", fontSize = 12.sp, color = Color(0xFF8B949E), modifier = Modifier.padding(bottom = 8.dp))
+            Text("Found ${uiState.searchResults.size} results", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
             
             LazyVerticalGrid(columns = GridCells.Fixed(2), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(uiState.searchResults) { result ->
                     Card(
                         modifier = Modifier.fillMaxWidth().height(200.dp).clickable { onPhotoClick(result) },
                         shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF21262D))
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                     ) {
                         Column {
                             Box(modifier = Modifier.fillMaxWidth().height(100.dp)) {
@@ -662,6 +671,7 @@ private fun SearchTab(
                                 val badgeColor = when (result.matchType) {
                                     MatchType.CLIP -> Color(0xFF8957E5) // Purple for CLIP
                                     MatchType.HYBRID -> Color(0xFFD29922) // Orange for hybrid
+                                    MatchType.SEMANTIC -> Color(0xFF008577)
                                     MatchType.VISION_LLM -> Color(0xFF8957E5) // Purple for VLM
                                     else -> Color(0xFF58A6FF) // Blue for OCR
                                 }
@@ -670,7 +680,7 @@ private fun SearchTab(
                                         .background(badgeColor.copy(alpha = 0.95f), RoundedCornerShape(6.dp))
                                         .padding(horizontal = 6.dp, vertical = 3.dp)
                                 ) {
-                                    Text(result.matchType.name, fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                    Text(result.matchType.name, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
                                 }
                                 // Score badge (top-right)
                                 Box(
@@ -678,7 +688,7 @@ private fun SearchTab(
                                         .background(Color(0xFF238636).copy(alpha = 0.95f), RoundedCornerShape(6.dp))
                                         .padding(horizontal = 6.dp, vertical = 3.dp)
                                 ) {
-                                    Text("${(result.score * 100).toInt()}%", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                    Text("${"%.4f".format(result.score)}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
                                 }
                             }
                             // Match reason
@@ -686,7 +696,7 @@ private fun SearchTab(
                                 Text(
                                     text = result.matchReason.take(50),
                                     fontSize = 10.sp,
-                                    color = Color(0xFFADBBC4),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
@@ -697,7 +707,7 @@ private fun SearchTab(
                                 Text(
                                     text = result.ocrText?.take(40) ?: "No OCR text",
                                     fontSize = 10.sp,
-                                    color = if (result.ocrText != null) Color(0xFF8B949E) else Color(0xFF6E7681),
+                                    color = if (result.ocrText != null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -708,14 +718,14 @@ private fun SearchTab(
             }
         } else if (uiState.searchQuery.isNotBlank() && !uiState.isSearching) {
             Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                Text("No results for \"${uiState.searchQuery}\"", fontSize = 14.sp, color = Color(0xFF8B949E))
+                Text("No results for \"${uiState.searchQuery}\"", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("🔍", fontSize = 40.sp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("Search text in indexed photos", fontSize = 13.sp, color = Color(0xFF8B949E))
+                    Text("Search text in indexed photos", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -734,7 +744,7 @@ private fun SearchTabScrollable(
             value = uiState.searchQuery,
             onValueChange = onQueryChange,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Search text in photos...", color = Color(0xFF6E7681)) },
+            placeholder = { Text("Search indexed photos...", color = MaterialTheme.colorScheme.onSurfaceVariant) },
             leadingIcon = {
                 if (uiState.isSearching) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFF58A6FF), strokeWidth = 2.dp)
                 else Text("🔍", fontSize = 18.sp)
@@ -744,19 +754,43 @@ private fun SearchTabScrollable(
             keyboardActions = KeyboardActions(onSearch = { onSearch() }),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = Color(0xFF58A6FF),
-                unfocusedBorderColor = Color(0xFF30363D),
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
                 cursorColor = Color(0xFF58A6FF)
             ),
             shape = RoundedCornerShape(12.dp)
         )
         
         Spacer(modifier = Modifier.height(12.dp))
-        
+
+        Button(onClick = onSearch, enabled = uiState.searchQuery.isNotBlank() && !uiState.isSearching &&
+            uiState.thesisMode in uiState.enabledThesisModes) { Text("Search") }
+        Text(uiState.thesisMode.displayLabel(), style = MaterialTheme.typography.labelMedium)
+        if (uiState.searchNote.isNotBlank()) Text(uiState.searchNote, style = MaterialTheme.typography.bodySmall)
+        uiState.lastQueryMs?.let { Text("Last query: ${"%.1f".format(it)} ms (diagnostic)", style = MaterialTheme.typography.labelSmall) }
+
+        // Query decomposition debug panel — shown for every search, not just one mode
+        if (uiState.slmDebugPlan.isNotBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                    .padding(10.dp)
+            ) {
+                Text(
+                    "🧩 Plan: ${uiState.slmDebugPlan}",
+                    fontSize = 10.sp,
+                    color = Color(0xFFD29922),
+                    maxLines = 2
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
         if (uiState.searchResults.isNotEmpty()) {
-            Text("Found ${uiState.searchResults.size} results", fontSize = 12.sp, color = Color(0xFF8B949E), modifier = Modifier.padding(bottom = 8.dp))
-            
+            Text("Found ${uiState.searchResults.size} results", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
+
             // Use Column with chunked rows for scrollable parent compatibility
             val chunkedResults = uiState.searchResults.chunked(2)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -774,14 +808,14 @@ private fun SearchTabScrollable(
             }
         } else if (uiState.searchQuery.isNotBlank() && !uiState.isSearching) {
             Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                Text("No results for \"${uiState.searchQuery}\"", fontSize = 14.sp, color = Color(0xFF8B949E))
+                Text("No results for \"${uiState.searchQuery}\"", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("🔍", fontSize = 40.sp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("Search text in indexed photos", fontSize = 13.sp, color = Color(0xFF8B949E))
+                    Text("Choose a compatible mode and search your existing local index", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -793,7 +827,7 @@ private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSe
     Card(
         modifier = modifier.height(200.dp).clickable { onPhotoClick(result) },
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF21262D))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column {
             Box(modifier = Modifier.fillMaxWidth().height(100.dp)) {
@@ -807,7 +841,9 @@ private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSe
                 val badgeColor = when (result.matchType) {
                     MatchType.CLIP -> Color(0xFF8957E5)
                     MatchType.HYBRID -> Color(0xFFD29922)
-                    MatchType.VISION_LLM -> Color(0xFF8957E5) // Purple for VLM
+                    MatchType.SEMANTIC -> Color(0xFF008577)
+                                    MatchType.VISION_LLM -> Color(0xFF8957E5)
+                    MatchType.SLM_PLANNER -> Color(0xFFD29922) // Amber for SLM
                     else -> Color(0xFF58A6FF)
                 }
                 Box(
@@ -815,7 +851,7 @@ private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSe
                         .background(badgeColor.copy(alpha = 0.95f), RoundedCornerShape(6.dp))
                         .padding(horizontal = 6.dp, vertical = 3.dp)
                 ) {
-                    Text(result.matchType.name, fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                    Text(result.matchType.name, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
                 }
                 // Score badge (top-right)
                 Box(
@@ -823,7 +859,7 @@ private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSe
                         .background(Color(0xFF238636).copy(alpha = 0.95f), RoundedCornerShape(6.dp))
                         .padding(horizontal = 6.dp, vertical = 3.dp)
                 ) {
-                    Text("${(result.score * 100).toInt()}%", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("${"%.4f".format(result.score)}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
                 }
             }
             // Match reason
@@ -831,7 +867,7 @@ private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSe
                 Text(
                     text = result.matchReason.take(50),
                     fontSize = 10.sp,
-                    color = Color(0xFFADBBC4),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
@@ -842,168 +878,11 @@ private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSe
                 Text(
                     text = result.ocrText?.take(40) ?: "No OCR text",
                     fontSize = 10.sp,
-                    color = if (result.ocrText != null) Color(0xFF8B949E) else Color(0xFF6E7681),
+                    color = if (result.ocrText != null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun ForceVlmIndexButton(
-    onNormalClick: () -> Unit,
-    onForceIndex: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var isPressed by remember { mutableStateOf(false) }
-    var progress by remember { mutableFloatStateOf(0f) }
-    var buttonText by remember { mutableStateOf("🧠 VLM Index") }
-    
-    // Animation for progress
-    LaunchedEffect(isPressed) {
-        if (isPressed) {
-            // Start progress after 2 seconds, complete at 5 seconds
-            val startDelay = 2000L
-            val progressDuration = 3000L // 2s to 5s = 3s
-            
-            kotlinx.coroutines.delay(startDelay)
-            buttonText = "⚡ Force VLM..."
-            
-            val startTime = System.currentTimeMillis()
-            while (isPressed && progress < 1f) {
-                val elapsed = System.currentTimeMillis() - startTime
-                progress = (elapsed.toFloat() / progressDuration).coerceIn(0f, 1f)
-                kotlinx.coroutines.delay(50)
-            }
-            
-            if (progress >= 1f) {
-                onForceIndex()
-            }
-        } else {
-            progress = 0f
-            buttonText = "🧠 VLM Index"
-        }
-    }
-    
-    Box(
-        modifier = modifier
-            .height(36.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF8957E5))
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        isPressed = true
-                        val released = tryAwaitRelease()
-                        if (released && progress < 0.1f) {
-                            // Short press - normal indexing
-                            onNormalClick()
-                        }
-                        isPressed = false
-                    }
-                )
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        // Progress overlay (left to right fill)
-        if (progress > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(progress)
-                    .align(Alignment.CenterStart)
-                    .background(Color(0xFFA371F7))
-            )
-        }
-        
-        Text(
-            text = buttonText,
-            fontSize = 12.sp,
-            color = Color.White,
-            fontWeight = FontWeight.Medium
-        )
-    }
-}
-
-/**
- * Force Index Button with long-press detection
- * Normal click: Regular indexing (skip already indexed)
- * Long press (5s): Force re-index all photos
- */
-@Composable
-private fun ForceIndexButton(
-    onNormalClick: () -> Unit,
-    onForceIndex: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var isPressed by remember { mutableStateOf(false) }
-    var progress by remember { mutableFloatStateOf(0f) }
-    var buttonText by remember { mutableStateOf("🔄 Index") }
-    
-    // Animation for progress
-    LaunchedEffect(isPressed) {
-        if (isPressed) {
-            // Start progress after 2 seconds, complete at 5 seconds
-            val startDelay = 2000L
-            val progressDuration = 3000L // 2s to 5s = 3s
-            
-            kotlinx.coroutines.delay(startDelay)
-            buttonText = "⚡ Force Indexing..."
-            
-            val startTime = System.currentTimeMillis()
-            while (isPressed && progress < 1f) {
-                val elapsed = System.currentTimeMillis() - startTime
-                progress = (elapsed.toFloat() / progressDuration).coerceIn(0f, 1f)
-                kotlinx.coroutines.delay(50)
-            }
-            
-            if (progress >= 1f) {
-                onForceIndex()
-            }
-        } else {
-            progress = 0f
-            buttonText = "🔄 Index"
-        }
-    }
-    
-    Box(
-        modifier = modifier
-            .height(36.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF238636))
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        isPressed = true
-                        val released = tryAwaitRelease()
-                        if (released && progress < 0.1f) {
-                            // Short press - normal indexing
-                            onNormalClick()
-                        }
-                        isPressed = false
-                    }
-                )
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        // Progress overlay (left to right fill)
-        if (progress > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(progress)
-                    .align(Alignment.CenterStart)
-                    .background(Color(0xFF2EA043))
-            )
-        }
-        
-        Text(
-            text = buttonText,
-            fontSize = 12.sp,
-            color = Color.White,
-            fontWeight = FontWeight.Medium
-        )
     }
 }

@@ -1,6 +1,12 @@
 package com.aksoyapps.edgeqslm.photos
 
 import android.content.Context
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.os.Build
+import android.content.pm.ServiceInfo
+import com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics
+import com.aksoyapps.edgeqslm.photos.models.ModelDelivery
 import android.util.Log
 import androidx.work.*
 import kotlinx.coroutines.flow.collect
@@ -18,6 +24,26 @@ class PhotoIndexingWorker(
     companion object {
         private const val TAG = "PhotoIndexingWorker"
         private const val WORK_NAME = "photo_indexing"
+        private const val THESIS_WORK_NAME = "thesis_photo_indexing"
+        private const val KEY_THESIS = "thesis_selection"
+
+        fun scheduleThesisIndexing(context: Context, session: ThesisIndexingSession) {
+            require(session.selectedPaths.isNotEmpty()) { "Choose photos before scheduling" }
+            ThesisIndexingStateStore(context, scheduled = true).save(session)
+            val request = PeriodicWorkRequestBuilder<PhotoIndexingWorker>(6, TimeUnit.HOURS)
+                .setConstraints(Constraints.Builder().setRequiresCharging(true).setRequiresBatteryNotLow(true).build())
+                .setInputData(workDataOf(KEY_THESIS to true))
+                .build()
+            WorkManager.getInstance(context).enqueueUniquePeriodicWork(THESIS_WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+            ThesisDiagnostics.get(context).event("background_scheduled", mapOf("selected" to session.total, "interval_hours" to 6, "requires_charging" to true), session.sessionId)
+        }
+
+        fun cancelThesisIndexing(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(THESIS_WORK_NAME)
+            ThesisDiagnostics.get(context).event("background_schedule_cancelled")
+        }
+
+        fun getThesisWorkInfo(context: Context) = WorkManager.getInstance(context).getWorkInfosForUniqueWorkLiveData(THESIS_WORK_NAME)
         
         // Input data keys
         const val KEY_IMAGE_MODEL_PATH = "image_model_path"
@@ -115,6 +141,23 @@ class PhotoIndexingWorker(
     }
     
     override suspend fun doWork(): Result {
+        if (inputData.getBoolean(KEY_THESIS, false)) {
+            val selected = ThesisIndexingStateStore(applicationContext, scheduled = true).snapshot()
+                ?: return Result.failure(workDataOf("error" to "missing_selection"))
+            if (ModelDelivery(applicationContext).isBusy) {
+                ThesisDiagnostics.get(applicationContext).event("background_skipped", mapOf("reason" to "model_delivery_active"), selected.sessionId)
+                return Result.success()
+            }
+            setForeground(getForegroundInfo())
+            ThesisDiagnostics.get(applicationContext).event("background_run_start", mapOf("selected" to selected.total), selected.sessionId)
+            ThesisIndexingController(applicationContext).run(selected.copy(
+                startedAt = System.currentTimeMillis(), status = "PENDING", completeMissingChannels = true,
+            )) { progress ->
+                setProgressAsync(workDataOf(KEY_CURRENT to progress.processed, KEY_TOTAL to progress.total, KEY_MESSAGE to progress.stage))
+            }
+            val completed = ThesisIndexingStateStore(applicationContext).snapshot()
+            return if (completed?.status == "COMPLETED") Result.success() else Result.failure()
+        }
         val imageModelPath = inputData.getString(KEY_IMAGE_MODEL_PATH)
         val textModelPath = inputData.getString(KEY_TEXT_MODEL_PATH)
         val vocabPath = inputData.getString(KEY_VOCAB_PATH)
@@ -151,17 +194,24 @@ class PhotoIndexingWorker(
             }
             
             Log.d(TAG, "Photo indexing completed")
-            indexer.close()
             Result.success()
             
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Indexing failed: ${e.message}", e)
-            indexer.close()
             Result.retry()
+        } finally {
+            indexer.close()
         }
     }
     
     override suspend fun getForegroundInfo(): ForegroundInfo {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            applicationContext.getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel("photo_indexing", "Scheduled photo indexing", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
         val notification = androidx.core.app.NotificationCompat.Builder(
             applicationContext, 
             "photo_indexing"
@@ -173,6 +223,7 @@ class PhotoIndexingWorker(
             .setOngoing(true)
             .build()
         
-        return ForegroundInfo(1002, notification)
+        return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(1002, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            else ForegroundInfo(1002, notification)
     }
 }

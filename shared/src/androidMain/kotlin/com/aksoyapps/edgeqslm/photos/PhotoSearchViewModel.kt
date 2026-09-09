@@ -2,13 +2,18 @@ package com.aksoyapps.edgeqslm.photos
 
 import android.content.Context
 import com.aksoyapps.edgeqslm.AndroidLlamaCppEngine
+import com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics
+import com.aksoyapps.edgeqslm.photos.models.ModelDelivery
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -19,16 +24,36 @@ class PhotoSearchViewModel(private val context: Context) {
     
     private val _uiState = MutableStateFlow(PhotoSearchUiState())
     val uiState: StateFlow<PhotoSearchUiState> = _uiState.asStateFlow()
+
+    @Volatile var lastSearchDiagnostics: ProductionSearchResponse? = null
+        private set
     
     private val scope = CoroutineScope(Dispatchers.Main)
     private var photoIndexer: PhotoIndexer? = null
     private var indexingJob: Job? = null
+    private val selectionStore = PhotoSelectionStore(context)
+    private var readinessJob: Job? = null
+    val selection: ThesisPhotoSelection? get() = selectionStore.snapshot()
     
     // VLM analyzer for Vision LLM search
     private var vlmAnalyzer: VlmImageAnalyzer? = null
-    private var vlmEngine: AndroidLlamaCppEngine? = null
     private var vlmIndexer: VlmIndexer? = null
     private var vlmIndexingJob: Job? = null
+
+    // SLM planner engine (TinyLlama, text-only) — loaded lazily on first mode switch
+    private var slmEngine: AndroidLlamaCppEngine? = null
+    private var slmLoader: (() -> Unit)? = null  // set by MainActivity
+
+    // VLM loader — set by MainActivity, triggered lazily on first VLM mode switch
+    private var vlmLoader: (() -> Unit)? = null
+
+    // CLIP loading state — loaded lazily on first ML search or ML mode switch
+    private var clipInitialized = false
+    private var clipLoading = false
+
+    // Guard against concurrent generate() calls — llama.cpp uses a single global context
+    @Volatile private var isGenerating = false
+    @Volatile private var lastSearchedQuery = ""
     
     // CLIP model paths
     private val modelsDir: File
@@ -48,53 +73,155 @@ class PhotoSearchViewModel(private val context: Context) {
     }
     
     private fun initialize() {
-        scope.launch(Dispatchers.IO) {
-            photoIndexer = PhotoIndexer(context)
-            
-            // Get default folder
-            val defaultFolder = photoIndexer?.getDefaultFolder() ?: ""
-            File(defaultFolder).mkdirs()
-            
-            // Log model paths for debugging
-            android.util.Log.d("PhotoSearchVM", "Models dir: ${modelsDir.absolutePath}")
-            android.util.Log.d("PhotoSearchVM", "CLIP image path: $clipImageModelPath, exists: ${File(clipImageModelPath).exists()}")
-            android.util.Log.d("PhotoSearchVM", "CLIP text path: $clipTextModelPath, exists: ${File(clipTextModelPath).exists()}")
-            
-            // Check if CLIP models exist
-            val clipModelsExist = File(clipImageModelPath).exists() && File(clipTextModelPath).exists()
-            
-            val (modelLoaded, modeMessage) = if (clipModelsExist) {
-                // Update UI to show loading state
-                _uiState.value = _uiState.value.copy(
-                    isModelLoading = true,
-                    modelLoadingMessage = "⏳ Loading CLIP models (~660MB)..."
-                )
-                
-                // Try to initialize CLIP models
-                android.util.Log.d("PhotoSearchVM", "Initializing CLIP models...")
-                val success = photoIndexer?.initialize(clipImageModelPath, clipTextModelPath, clipVocabPath) ?: false
-                android.util.Log.d("PhotoSearchVM", "CLIP init result: $success")
-                if (success) {
-                    Pair(true, "✅ CLIP + OCR mode")
-                } else {
-                    Pair(true, "⚠️ OCR only (CLIP failed)")
-                }
-            } else {
-                android.util.Log.d("PhotoSearchVM", "CLIP models not found")
-                Pair(true, "📝 OCR only (no CLIP)")
+        scope.launch {
+            ModelDelivery(context).busyState.collect { busy ->
+                if (busy) _uiState.value = _uiState.value.copy(indexingBlockReason = "Wait for the active model operation to finish before indexing.")
+                else refreshModeAvailability()
             }
-            
+        }
+        scope.launch(Dispatchers.IO) {
+            photoIndexer = PhotoIndexer(context.applicationContext)
+            refreshPhotoList()
+            refreshModeAvailability()
+        }
+    }
+
+    fun refreshModeAvailability() {
+        readinessJob?.cancel()
+        readinessJob = scope.launch(Dispatchers.IO) {
+            val store = photoIndexer?.getVectorStore() ?: return@launch
+            try {
+                if (ModelDelivery(context).isBusy) {
+                    _uiState.value = _uiState.value.copy(indexingBlockReason = "Wait for the active model operation to finish before indexing.")
+                    return@launch
+                }
+                val modes = ThesisSearchEngine(context.applicationContext, store).availability()
+                val selected = selectionStore.snapshot()
+                val session = ThesisIndexingStateStore(context).snapshot()
+                val readiness = ThesisIndexingReadiness.inspect(context, selected?.photos.orEmpty().map { it.path }, true)
+                if (ModelDelivery(context).isBusy) return@launch
+                val sameSelection = selected != null && session != null && session.sessionId == selected.sessionId &&
+                    session.selectedPaths == selected.photos.map { it.path }
+                _uiState.value = _uiState.value.copy(
+                    enabledThesisModes = modes.filter { it.enabled }.map { it.mode }.toSet(),
+                    modeReasons = modes.associate { it.mode to it.reason },
+                    canCompleteMissingChannels = sameSelection && session?.canRequestCompletion == true && readiness.canComplete,
+                    missingChannelSummary = readiness.summary,
+                    indexingBlockReason = "",
+                )
+            } catch (cancelled: CancellationException) { throw cancelled
+            } catch (failure: Exception) {
+                _uiState.value = _uiState.value.copy(indexingBlockReason = "Index/model status could not be checked (${failure.javaClass.simpleName}). Refresh or inspect Diagnostics.")
+            }
+        }
+    }
+
+    fun prepareIndexingStart(completeMissing: Boolean, onReady: (ThesisIndexingSession) -> Unit) {
+        val current = _uiState.value
+        if (current.isIndexing || current.isVlmIndexing || current.isSelectingPhotos || current.isIndexingPreflight) return
+        val selected = selectionStore.snapshot()
+        if (selected == null || selected.photos.isEmpty()) { reportError("Choose photos before indexing"); return }
+        _uiState.value = current.copy(isIndexingPreflight = true, indexingBlockReason = "", error = null)
+        scope.launch {
+            try {
+                val session = withContext(Dispatchers.IO) {
+                    check(!ModelDelivery(context).isBusy) { "Wait for the active model operation to finish before indexing." }
+                    check(selected.photos.all { File(it.path).let { file -> file.isFile && file.canRead() } }) { "Some selected photos are unavailable. Choose a readable source before indexing." }
+                    val existing = ThesisIndexingStateStore(context).snapshot()
+                    val readiness = ThesisIndexingReadiness.inspect(context, selected.photos.map { it.path }, true)
+                    if (completeMissing) {
+                        check(existing?.canRequestCompletion == true && existing.sessionId == selected.sessionId &&
+                            existing.selectedPaths == selected.photos.map { it.path }) { "The completed session no longer matches the selected photos." }
+                        check(readiness.canComplete) { readiness.summary }
+                    }
+                    check(!ModelDelivery(context).isBusy) { "A model operation started. Finish it before indexing." }
+                    if (completeMissing) requireNotNull(existing).copy(completeMissingChannels = true) else
+                        ThesisIndexingSession(sessionId = selected.sessionId, selectedPaths = selected.photos.map { it.path }, includeSemantic = true)
+                }
+                onReady(session)
+                _uiState.value = _uiState.value.copy(isIndexing = true, indexingMessage = "Starting selected photos", canCompleteMissingChannels = false)
+            } catch (cancelled: CancellationException) { throw cancelled
+            } catch (failure: Exception) {
+                _uiState.value = _uiState.value.copy(indexingBlockReason = failure.message ?: "Indexing preflight failed.")
+            } finally { _uiState.value = _uiState.value.copy(isIndexingPreflight = false) }
+        }
+    }
+
+    fun setThesisMode(mode: ThesisSearchMode) {
+        if (mode !in _uiState.value.enabledThesisModes) return
+        _uiState.value = _uiState.value.copy(thesisMode = mode, searchResults = emptyList(), searchNote = "")
+        if (_uiState.value.searchQuery.isNotBlank()) search()
+    }
+
+    fun chooseFolder(uri: android.net.Uri) = selectPhotos { selectionStore.chooseFolder(uri) }
+    fun chooseRandomSample(count: Int) = selectPhotos { selectionStore.randomSample(count) }
+
+    private fun selectPhotos(action: suspend () -> ThesisPhotoSelection) {
+        if (_uiState.value.isIndexing || _uiState.value.isVlmIndexing || _uiState.value.isSelectingPhotos || _uiState.value.isIndexingPreflight) return
+        scope.launch(Dispatchers.IO) {
+            _uiState.value = _uiState.value.copy(isSelectingPhotos = true, error = null)
+            try {
+                val selected = action()
+                com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics.get(context).event("photo_selection",
+                    mapOf("selected_count" to selected.photos.size), selected.sessionId)
+                refreshPhotoList()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                _uiState.value = _uiState.value.copy(error = failure.message ?: "Photo selection failed")
+            } finally {
+                _uiState.value = _uiState.value.copy(isSelectingPhotos = false)
+            }
+        }
+    }
+
+    fun resetSelection() {
+        if (_uiState.value.isIndexing || _uiState.value.isVlmIndexing || _uiState.value.isIndexingPreflight) return
+        selectionStore.reset()
+        com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics.get(context).event("photo_selection_reset")
+        refreshPhotoList()
+    }
+
+    /**
+     * Load CLIP models on demand (first ML search or explicit ML mode switch).
+     * Safe to call multiple times — subsequent calls are no-ops.
+     */
+    private fun loadClipIfNeeded() {
+        if (clipInitialized || clipLoading) return
+        clipLoading = true
+
+        scope.launch(Dispatchers.IO) {
             _uiState.value = _uiState.value.copy(
-                scanFolderPath = defaultFolder,
+                isModelLoading = true,
+                modelLoadingMessage = "⏳ Loading CLIP models (~660MB)..."
+            )
+
+            android.util.Log.d("PhotoSearchVM", "CLIP image: $clipImageModelPath exists=${File(clipImageModelPath).exists()}")
+            android.util.Log.d("PhotoSearchVM", "CLIP text:  $clipTextModelPath  exists=${File(clipTextModelPath).exists()}")
+
+            val clipModelsExist = File(clipImageModelPath).exists() && File(clipTextModelPath).exists()
+            val modeMessage = if (clipModelsExist) {
+                val success = photoIndexer?.initialize(clipImageModelPath, clipTextModelPath, clipVocabPath) ?: false
+                android.util.Log.d("PhotoSearchVM", "CLIP init: $success")
+                if (success) "✅ CLIP + OCR mode" else "⚠️ OCR only (CLIP failed)"
+            } else {
+                android.util.Log.d("PhotoSearchVM", "CLIP models not found — OCR only")
+                "📝 OCR only (no CLIP)"
+            }
+
+            clipInitialized = true
+            clipLoading = false
+
+            _uiState.value = _uiState.value.copy(
                 isModelLoading = false,
-                isModelLoaded = modelLoaded,
+                isModelLoaded = true,
                 modelLoadingMessage = modeMessage
             )
-            
-            android.util.Log.d("PhotoSearchVM", "Mode: $modeMessage, CLIP exists: $clipModelsExist")
-            
-            // Refresh photo list
-            refreshPhotoList()
+
+            // CLIP now contributes a visual-similarity channel to every search — refresh results
+            if (_uiState.value.searchQuery.isNotBlank()) {
+                search()
+            }
         }
     }
     
@@ -103,24 +230,67 @@ class PhotoSearchViewModel(private val context: Context) {
      */
     fun refreshPhotoList() {
         scope.launch(Dispatchers.IO) {
-            val photos = photoIndexer?.getPhotosInFolder() ?: emptyList()
-            val stats = photoIndexer?.getStats()
-            
+            val selected = selectionStore.snapshot()
+            val indexedPaths = photoIndexer?.getVectorStore()?.getAllIndexedPaths().orEmpty()
+            val photos = selected?.photos.orEmpty()
             _uiState.value = _uiState.value.copy(
-                photoFiles = photos.map { 
-                    PhotoFileUi(
-                        path = it.path,
-                        name = it.name,
-                        sizeKb = it.size / 1024,
-                        isIndexed = it.isIndexed
-                    )
+                sourceLabel = selected?.source ?: "No photos selected",
+                selectionSessionId = selected?.sessionId.orEmpty(),
+                scanFolderPath = photos.firstOrNull()?.path?.let { File(it).parent }.orEmpty(),
+                photoFiles = photos.map {
+                    PhotoFileUi(path = it.path, name = it.name, sizeKb = File(it.path).length() / 1024,
+                        isIndexed = it.path in indexedPaths)
                 },
-                totalPhotos = stats?.totalPhotos ?: 0,
-                indexedCount = stats?.indexedPaths ?: 0
+                totalPhotos = photos.size,
+                indexedCount = photos.count { it.path in indexedPaths },
+                existingIndexCount = indexedPaths.size,
             )
+            refreshModeAvailability()
         }
     }
-    
+
+    fun refreshIndexingState() {
+        val session = ThesisIndexingStateStore(context.applicationContext).snapshot()
+        val selected = selectionStore.snapshot()?.photos.orEmpty()
+        val states = session?.photos.orEmpty().associateBy { it.path }
+        val selectedStates = selected.map { states[it.path] ?: PhotoChannelState(it.path, "unindexed") }
+        val coverage = IndexCoverage.from(selectedStates)
+        val state = _uiState.value
+        val memory = runCatching { ThesisDiagnostics.get(context).snapshot() }.getOrDefault(emptyMap())
+        _uiState.value = state.copy(
+            isIndexing = session?.isRunning == true,
+            isVlmIndexing = false,
+            canResumeIndexing = session?.canResume == true,
+            indexingProgress = if (session != null && session.total > 0) session.processed.toFloat() / session.total else 0f,
+            indexingMessage = session?.let { "${it.status} · ${it.stage} · ${it.processed}/${it.total}" }.orEmpty(),
+            indexingElapsedMs = session?.let { (it.finishedAt ?: System.currentTimeMillis()) - (it.activeStartedAt ?: it.startedAt) },
+            indexingStage = session?.stage.orEmpty(),
+            indexingProcessed = session?.processed ?: 0,
+            indexingTotal = session?.total ?: 0,
+            indexingRssMiB = (memory["rss_bytes"] as? Number)?.toDouble()?.div(1024 * 1024) ?: session?.sampledRssMiB,
+            indexingPeakRssMiB = (memory["peak_sampled_rss_bytes"] as? Number)?.toDouble()?.div(1024 * 1024) ?: session?.peakSampledRssMiB,
+            indexingFailedPhotos = selectedStates.count { photo -> listOf(photo.ocr, photo.clip, photo.vlmSource,
+                photo.semanticProjection, photo.miniLmVector).any { it == ChannelIndexStatus.FAILED } },
+            indexingUnavailablePhotos = selectedStates.count { photo -> listOf(photo.ocr, photo.clip, photo.vlmSource,
+                photo.semanticProjection, photo.miniLmVector).any { it == ChannelIndexStatus.UNAVAILABLE } },
+            searchableCount = coverage.searchable,
+            fullyIndexedCount = coverage.fullyIndexed,
+            partiallyIndexedCount = coverage.partiallyIndexed,
+            failedUnavailableCount = coverage.failedUnavailable,
+            coverageSummary = "OCR ${coverage.ocr} · CLIP ${coverage.clip} · VLM ${coverage.vlmSource} · Projection ${coverage.semanticProjection} · MiniLM ${coverage.miniLmVector}",
+            photoFiles = state.photoFiles.map { photo ->
+                val channels = states[photo.path]
+                photo.copy(channelStates = if (channels == null) emptyMap() else mapOf(
+                    "OCR" to channels.ocr.name, "CLIP" to channels.clip.name,
+                    "VLM source" to channels.vlmSource.name,
+                    "Semantic projection" to channels.semanticProjection.name,
+                    "MiniLM vector" to channels.miniLmVector.name,
+                ).mapValues { (name, status) -> channels.unavailableReasons[name]?.let { "$status: $it" } ?: status })
+            },
+        )
+        if (state.isIndexing && session?.isRunning != true) refreshPhotoList()
+    }
+
     /**
      * Update search query and search immediately
      */
@@ -134,116 +304,105 @@ class PhotoSearchViewModel(private val context: Context) {
     }
     
     /**
-     * Perform search - uses CLIP embedding if available, otherwise OCR text search
-     * If VLM mode is selected and available, uses Vision LLM instead
+     * Perform a unified search: every available channel contributes to one ranked list.
+     *
+     * There is no exclusive "mode" that picks a single retrieval strategy anymore.
+     * Keyword scoring (OCR text, VLM tags/description, filename/path) via
+     * [SlmSearchEngine] always runs — it needs no loaded model, only a deterministic
+     * [QueryEnricher] fallback when TinyLlama isn't loaded. CLIP visual similarity is
+     * blended in on top of that whenever the CLIP encoder has been loaded. This mirrors
+     * the target architecture's "candidate ranking" stage: one local index, several
+     * retrieval channels, one combined result — instead of three switchable, isolated
+     * search backends.
      */
     fun search() {
         val query = _uiState.value.searchQuery
         if (query.isBlank()) return
-        
-        // Check if VLM mode is selected
-        if (_uiState.value.searchMode == SearchMode.VLM_BASED) {
-            searchWithVLM()
+        searchUnified(query)
+    }
+
+    /**
+     * generate() is a blocking JNI call that writes to a single global llama.cpp context.
+     * Concurrent calls corrupt that state and cause SIGSEGV. We drop any call that arrives
+     * while one is already in flight; after the current call finishes we check whether the
+     * query changed and, if so, run one final search for the latest value.
+     */
+    private fun searchUnified(query: String) {
+        if (isGenerating) return
+        val mode = _uiState.value.thesisMode
+        if (mode !in _uiState.value.enabledThesisModes) {
+            _uiState.value = _uiState.value.copy(error = _uiState.value.modeReasons[mode]
+                ?: "This mode needs compatible models and an existing index")
             return
         }
-        
         scope.launch(Dispatchers.IO) {
-            _uiState.value = _uiState.value.copy(isSearching = true)
-            
+            if (isGenerating) return@launch
+            isGenerating = true
+            _uiState.value = _uiState.value.copy(isSearching = true, error = null)
             try {
-                val results = photoIndexer?.search(query) ?: emptyList()
-                
+                val store = photoIndexer?.getVectorStore() ?: error("Index is unavailable")
+                val result = ThesisSearchEngine(context.applicationContext, store).search(query, mode)
                 _uiState.value = _uiState.value.copy(
-                    isSearching = false,
-                    searchResults = results.map { result ->
-                        PhotoSearchResultUi(
-                            id = result.id,
-                            filePath = result.filePath,
-                            fileName = result.fileName,
-                            ocrText = result.ocrText,
-                            score = result.score,
-                            thumbnailUri = "file://${result.filePath}",
-                            matchType = when (result.matchType) {
-                                "CLIP" -> MatchType.CLIP
-                                "HYBRID" -> MatchType.HYBRID
-                                else -> MatchType.OCR
-                            },
-                            matchReason = result.matchReason
-                        )
-                    }
+                    isSearching = false, searchResults = result.results, searchNote = result.note,
+                    lastQueryMs = result.timingsMs["total_ms"], slmDebugPlan = "",
                 )
-            } catch (e: Exception) {
-                android.util.Log.e("PhotoSearchVM", "Search error: ${e.message}", e)
-                _uiState.value = _uiState.value.copy(
-                    isSearching = false,
-                    error = "Search error: ${e.message}"
-                )
-            }
-        }
-    }
-    
-    /**
-     * Search using Vision LLM - uses pre-indexed VLM descriptions from database
-     * This is instant because descriptions are already stored
-     */
-    private fun searchWithVLM() {
-        val query = _uiState.value.searchQuery
-        if (query.isBlank()) return
-        
-        scope.launch(Dispatchers.IO) {
-            _uiState.value = _uiState.value.copy(isSearching = true)
-            
-            try {
-                // Search pre-indexed VLM descriptions in database
-                val vectorStore = photoIndexer?.getVectorStore()
-                val dbResults = vectorStore?.searchVlmDescriptions(query) ?: emptyList()
-                
-                if (dbResults.isNotEmpty()) {
-                    android.util.Log.d("PhotoSearchVM", "VLM DB search found ${dbResults.size} matches")
-                    
-                    val results = dbResults.map { result ->
-                        PhotoSearchResultUi(
-                            id = result.id,
-                            filePath = result.filePath,
-                            fileName = result.fileName,
-                            ocrText = result.ocrText,
-                            score = result.score,
-                            thumbnailUri = "file://${result.filePath}",
-                            matchType = MatchType.VISION_LLM,
-                            matchReason = result.matchReason,
-                            latencyMs = 0, // Instant from DB
-                            vlmDescription = result.vlmDescription,
-                            vlmTags = result.vlmTags
-                        )
-                    }
-                    
-                    _uiState.value = _uiState.value.copy(
-                        isSearching = false,
-                        searchResults = results,
-                        indexingMessage = ""
-                    )
-                } else {
-                    // No VLM-indexed photos found
-                    val vlmIndexedCount = vectorStore?.getVlmIndexedCount() ?: 0
-                    val totalPhotos = vectorStore?.getPhotoCount() ?: 0
-                    
-                    _uiState.value = _uiState.value.copy(
-                        isSearching = false,
-                        searchResults = emptyList(),
-                        error = "No VLM matches found ($vlmIndexedCount/$totalPhotos photos indexed). Tap 'VLM Index' to analyze photos."
-                    )
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                _uiState.value = _uiState.value.copy(isSearching = false,
+                    searchResults = emptyList(), error = failure.message ?: "Search failed")
+            } finally {
+                isGenerating = false
+                _uiState.value = _uiState.value.copy(isSearching = false)
+                val current = _uiState.value
+                if ((current.searchQuery != query || current.thesisMode != mode) && current.searchQuery.isNotBlank()) {
+                    searchUnified(current.searchQuery)
                 }
-                
-            } catch (e: Exception) {
-                android.util.Log.e("PhotoSearchVM", "VLM search error: ${e.message}", e)
-                _uiState.value = _uiState.value.copy(
-                    isSearching = false,
-                    error = "VLM search error: ${e.message}"
-                )
             }
         }
     }
-    
+
+    /**
+     * Ask TinyLlama to decompose the query into a structured plan; falls back to
+     * deterministic tokenization when the planner isn't loaded or generation fails.
+     */
+    private suspend fun buildRawPlan(query: String): SearchPlan {
+        val engine = slmEngine ?: return SearchPlan.fallback(query)
+        val systemPrompt = "You are an on-device image search planner. Convert the user's Turkish or English query into a compact JSON search plan. Return only valid JSON. Do not explain."
+        val userMessage = "Query: $query\nReturn JSON with this schema:\n{\"intent\":\"SEARCH_IMAGES\",\"query_terms\":[],\"search_channels\":[\"ocr_text\",\"vlm_description\",\"vlm_tags\",\"file_name\",\"file_path\"],\"ocr_required\":false,\"prefer_screenshot\":false,\"top_k\":10}"
+        val prompt = "<|system|>\n$systemPrompt\n<|user|>\n$userMessage\n<|assistant|>\n"
+        return try {
+            val result = engine.generate(
+                com.aksoyapps.edgeqslm.GenerationRequest(
+                    prompt = prompt,
+                    maxTokens = 150,
+                    temperature = 0.1f,
+                    useChatTemplate = false
+                )
+            )
+            android.util.Log.d("PhotoSearchVM", "SLM raw output: ${result.text}")
+            SearchPlan.fromJson(result.text) ?: SearchPlan.fallback(query)
+        } catch (e: Exception) {
+            android.util.Log.w("PhotoSearchVM", "SLM inference failed: ${e.message}")
+            SearchPlan.fallback(query)
+        }
+    }
+
+    /**
+     * Set SLM planner engine availability
+     * Called from MainActivity when edgeq_planner_tinyllama_q4_k_m.gguf is loaded
+     */
+    fun setSlmAvailable(available: Boolean, engine: AndroidLlamaCppEngine? = null) {
+        slmEngine = if (available) engine else null
+        _uiState.value = _uiState.value.copy(isSlmAvailable = available)
+        android.util.Log.d("PhotoSearchVM", "SLM planner availability: $available")
+
+        // TinyLlama upgrades the keyword channel's term decomposition — refresh results now
+        if (available && _uiState.value.searchQuery.isNotBlank()) {
+            search()
+        }
+    }
+
     /**
      * Start VLM indexing - analyzes photos with Vision LLM in background
      */
@@ -403,16 +562,50 @@ class PhotoSearchViewModel(private val context: Context) {
     }
     
     /**
-     * Set search mode (ML-based or VLM-based)
+     * Register loaders that MainActivity calls to start model loading on demand.
+     * Callbacks keep the ViewModel free of Context references.
+     */
+    fun setVlmLoader(loader: () -> Unit) { vlmLoader = loader }
+    fun setSlmLoader(loader: () -> Unit) { slmLoader = loader }
+
+    /** Called by MainActivity at the start and end of VLM model loading. */
+    fun setVlmLoading(loading: Boolean) {
+        _uiState.value = _uiState.value.copy(isVlmLoading = loading)
+    }
+
+    /** Called by MainActivity at the start and end of SLM model loading. */
+    fun setSlmLoading(loading: Boolean) {
+        _uiState.value = _uiState.value.copy(isSlmLoading = loading)
+    }
+
+    /**
+     * Load the engine backing one search channel on demand. `mode` no longer selects an
+     * exclusive search backend — every loaded channel contributes to the same unified
+     * ranking — it only identifies which badge was tapped and which engine to lazy-load.
+     * VLM loads the vision model used for indexing (background captioning), not search:
+     * VLM tags/description are already stored in the DB and searched for free once indexed.
      */
     fun setSearchMode(mode: SearchMode) {
-        _uiState.value = _uiState.value.copy(searchMode = mode)
-        android.util.Log.d("PhotoSearchVM", "Search mode changed to: $mode")
-        
-        // Clear results when switching modes
-        _uiState.value = _uiState.value.copy(searchResults = emptyList())
-        
-        // Re-run search if query exists
+        val state = _uiState.value
+
+        when (mode) {
+            SearchMode.ML_BASED -> if (!clipInitialized && !clipLoading) {
+                android.util.Log.d("PhotoSearchVM", "CLIP not loaded — triggering lazy load")
+                loadClipIfNeeded()
+            }
+            SearchMode.VLM_BASED -> if (!state.isVlmAvailable && !state.isVlmLoading) {
+                android.util.Log.d("PhotoSearchVM", "VLM not loaded — triggering lazy load")
+                vlmLoader?.invoke()
+            }
+            SearchMode.SLM_BASED -> if (!state.isSlmAvailable && !state.isSlmLoading) {
+                android.util.Log.d("PhotoSearchVM", "SLM not loaded — triggering lazy load")
+                slmLoader?.invoke()
+            }
+        }
+
+        _uiState.value = state.copy(searchMode = mode)
+        android.util.Log.d("PhotoSearchVM", "Active channel badge → $mode")
+
         if (_uiState.value.searchQuery.isNotBlank()) {
             search()
         }
@@ -422,15 +615,12 @@ class PhotoSearchViewModel(private val context: Context) {
      * Update VLM availability status and initialize analyzer
      * Called from MainActivity when VLM is loaded
      */
-    fun setVlmAvailable(available: Boolean, engine: AndroidLlamaCppEngine? = null) {
+    fun setVlmAvailable(available: Boolean) {
         _uiState.value = _uiState.value.copy(isVlmAvailable = available)
         android.util.Log.d("PhotoSearchVM", "VLM availability: $available")
         
-        if (available && engine != null) {
-            vlmEngine = engine
-            vlmAnalyzer = VlmImageAnalyzer(context).apply {
-                initialize(engine)
-            }
+        if (available) {
+            vlmAnalyzer = VlmImageAnalyzer(context.applicationContext)
             android.util.Log.d("PhotoSearchVM", "VlmImageAnalyzer initialized")
             
             // Initialize VlmIndexer for pre-indexing
@@ -445,11 +635,13 @@ class PhotoSearchViewModel(private val context: Context) {
             }
         } else {
             vlmAnalyzer = null
-            vlmEngine = null
             vlmIndexer = null
         }
+        // Note: loading the VLM model only enables VLM *indexing* (background captioning).
+        // Search already reads vlm_description/vlm_tags from the DB regardless of whether
+        // this model is loaded, so there's no search result to refresh here.
     }
-    
+
     /**
      * Select tab
      */
@@ -463,6 +655,10 @@ class PhotoSearchViewModel(private val context: Context) {
     /**
      * Clear error
      */
+    fun reportError(message: String) {
+        _uiState.value = _uiState.value.copy(error = message)
+    }
+
     fun clearError() {
         _uiState.value = _uiState.value.copy(error = null)
     }
@@ -471,8 +667,14 @@ class PhotoSearchViewModel(private val context: Context) {
      * Cleanup
      */
     fun close() {
-        indexingJob?.cancel()
-        photoIndexer?.close()
+        val ownerJob = scope.coroutineContext[Job]
+        ownerJob?.cancel()
+        CoroutineScope(Dispatchers.IO).launch {
+            ownerJob?.join()
+            photoIndexer?.close()
+            slmEngine?.unload()
+            slmEngine = null
+        }
     }
     
     /**
@@ -522,4 +724,3 @@ class PhotoSearchViewModel(private val context: Context) {
         }
     }
 }
-

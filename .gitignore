@@ -1,5 +1,6 @@
 # Gradle
 .gradle/
+.kotlin/
 build/
 !gradle/wrapper/gradle-wrapper.jar
 
@@ -9,18 +10,41 @@ build/
 *.ipr
 *.iws
 .DS_Store
+xcuserdata/
+*.xcuserstate
 
 # Local configuration
 local.properties
+.claude/settings.local.json
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.p8
+*.mobileprovision
 
 # Kotlin
 *.class
+
+# Python validation helpers
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
 
 # Android
 *.apk
 *.aab
 *.dex
 *.ap_
+
+# iOS build products
+DerivedData/
+*.ipa
+*.dSYM/
+*.xcarchive/
 
 # Native
 *.so
@@ -37,7 +61,35 @@ local.properties
 # Models
 *.gguf
 *.bin
+*.onnx
+*.safetensors
 models/
+!shared/src/androidMain/kotlin/com/aksoyapps/edgeqslm/photos/models/
+!shared/src/androidUnitTest/kotlin/com/aksoyapps/edgeqslm/photos/models/
+!composeApp/src/androidInstrumentedTest/kotlin/com/aksoyapps/edgeqslm/photos/models/
+
+# Local model cache and generated validation builds
+/on_device_photo_search/hf_cache/
+/on_device_photo_search/agent_handoff/**/build_state/
+/on_device_photo_search/agent_handoff/**/*.jar
+/on_device_photo_search/agent_handoff/**/*.aar
+
+# Binary archives and device database snapshots; retain reports and seals.
+/on_device_photo_search/**/*.zip
+/on_device_photo_search/**/*.tar
+/on_device_photo_search/**/*.tar.gz
+/on_device_photo_search/**/*.tgz
+/on_device_photo_search/**/*.db
+/on_device_photo_search/**/*.db-*
+/on_device_photo_search/**/*.sqlite
+/on_device_photo_search/**/*.sqlite-*
+/on_device_photo_search/**/*.sqlite3
+/on_device_photo_search/**/*.sqlite3-*
+
+# Local original-photo corpus; do not ignore app image resources.
+/on_device_photo_search/benchmark/independent_heldout_v1/raw_images/
+/on_device_photo_search/agent_handoff/**/frozen_prepared_corpus/images/
+/on_device_photo_search/agent_handoff/**/frozen_benchmark_corpus/images/
 
 # Benchmark results (large files)
 results/*.csv
@@ -45,4 +97,3 @@ results/*.json
 results/*.txt
 !results/README.md
 !results/*_sample.*
-

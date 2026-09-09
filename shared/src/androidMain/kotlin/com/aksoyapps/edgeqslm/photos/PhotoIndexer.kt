@@ -6,9 +6,13 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
 import kotlin.coroutines.resume
@@ -19,9 +23,15 @@ import kotlin.coroutines.resume
 class PhotoIndexer(private val context: Context) {
     
     private val vectorStore = PhotoVectorStore(context)
+    private val diagnostics = ThesisDiagnostics.get(context)
     private var imageEncoder: ClipImageEncoder? = null
     private var textEncoder: ClipTextEncoder? = null
     private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private var encoderPaths: Triple<String, String, String?>? = null
+
+    init {
+        ModelResourceCoordinator.registerClipOwner(this) { releaseEncoders() }
+    }
     
     // Current scan folder
     private var scanFolder: File? = null
@@ -30,11 +40,32 @@ class PhotoIndexer(private val context: Context) {
      * Initialize encoders
      */
     fun initialize(imageModelPath: String, textModelPath: String, vocabPath: String? = null): Boolean {
+        encoderPaths = Triple(imageModelPath, textModelPath, vocabPath)
+        return try {
+            ModelResourceCoordinator.withClipResources {
+                releaseEncoders()
+                loadEncoders()
+            }
+        } catch (_: IllegalStateException) {
+            false
+        }
+    }
+
+    private fun loadEncoders(): Boolean {
+        val (imageModelPath, textModelPath, vocabPath) = encoderPaths ?: return false
+        ModelResourceCoordinator.prepareClipLoad(this)
         imageEncoder = ClipImageEncoder(context).also {
-            if (!it.initialize(imageModelPath)) return false
+            if (!it.initialize(imageModelPath)) {
+                it.close()
+                return false
+            }
         }
         textEncoder = ClipTextEncoder(context).also {
-            if (!it.initialize(textModelPath, vocabPath)) return false
+            if (!it.initialize(textModelPath, vocabPath)) {
+                it.close()
+                releaseEncoders()
+                return false
+            }
         }
         android.util.Log.d("PhotoIndexer", "Encoders initialized successfully")
         return true
@@ -45,7 +76,6 @@ class PhotoIndexer(private val context: Context) {
      */
     fun setScanFolder(folderPath: String) {
         scanFolder = File(folderPath)
-        android.util.Log.d("PhotoIndexer", "Scan folder set to: $folderPath, exists: ${scanFolder?.exists()}")
     }
     
     /**
@@ -96,7 +126,6 @@ class PhotoIndexer(private val context: Context) {
     fun getPhotosInFolder(): List<PhotoFile> {
         val folder = scanFolder ?: File(getDefaultFolder())
         
-        android.util.Log.d("PhotoIndexer", "Getting photos from: ${folder.absolutePath}")
         android.util.Log.d("PhotoIndexer", "Folder exists: ${folder.exists()}, isDirectory: ${folder.isDirectory}")
         
         if (!folder.exists()) {
@@ -132,8 +161,19 @@ class PhotoIndexer(private val context: Context) {
      * Index all photos in the folder
      */
     fun indexFolder(): Flow<IndexingProgress> = flow {
+        emitAll(indexSelected(getPhotosInFolder()))
+    }.flowOn(Dispatchers.IO)
+
+    fun indexSelected(
+        selected: List<PhotoFile>,
+        completeMissingChannels: Boolean = false,
+        clipAvailable: Boolean = true,
+        onPhotoStart: (PhotoFile) -> Unit = {},
+        onOutcome: (PhotoIndexOutcome) -> Unit = {},
+    ): Flow<IndexingProgress> = flow {
+        ModelResourceCoordinator.withClipSession {
         android.util.Log.d("PhotoIndexer", "indexFolder STARTED")
-        val photos = getPhotosInFolder()
+        val photos = selected.distinctBy { it.path }
         val total = photos.size
         var indexed = 0
         var skipped = 0
@@ -144,28 +184,43 @@ class PhotoIndexer(private val context: Context) {
         
         if (total == 0) {
             emit(IndexingProgress(0, 0, "No photos found in folder", isComplete = true))
-            return@flow
+            return@withClipSession
         }
         
         for (photo in photos) {
+            currentCoroutineContext().ensureActive()
+            onPhotoStart(photo)
+            var channelPlan: PhotoChannelWorkPlan? = null
             try {
                 // Check if already indexed and up-to-date
                 val needs = vectorStore.needsIndexing(photo.path, photo.lastModified)
-                android.util.Log.d("PhotoIndexer", "Check ${photo.name}: needsIndexing=$needs")
+
+                if (completeMissingChannels) {
+                    val existing = vectorStore.getPhotoForVlmPath(photo.path)
+                    channelPlan = PhotoChannelWorkPlan.create(
+                        currentFile = existing?.fileModified == photo.lastModified,
+                        currentOcrOutcome = OcrIndexProvenanceStore(context).hasCurrentOutcome(vectorStore, photo.path, photo.lastModified),
+                        compatibleClip = ClipIndexProvenanceStore(context).isCompatible(vectorStore, photo.path),
+                        clipAvailable = clipAvailable,
+                    )
+                }
                 
-                if (!needs) {
+                if (channelPlan?.hasWork == false || (channelPlan == null && !needs)) {
                     skipped++
+                    onOutcome(PhotoIndexOutcome(photo.path, skipped = true))
+                    emit(IndexingProgress(indexed + skipped + failed, total, "Reused existing index", skipped = skipped, failed = failed))
                     continue
                 }
                 
                 // Index the photo
                 val startTime = System.currentTimeMillis()
-                indexPhoto(photo)
+                val outcome = indexPhoto(photo, channelPlan)
+                onOutcome(outcome)
                 val latency = System.currentTimeMillis() - startTime
                 indexed++
                 
                 emit(IndexingProgress(
-                    current = indexed + skipped,
+                    current = indexed + skipped + failed,
                     total = total,
                     message = "Indexed: $indexed, Skipped: $skipped",
                     currentFile = photo.name,
@@ -174,9 +229,12 @@ class PhotoIndexer(private val context: Context) {
                     success = true
                 ))
                 
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                android.util.Log.e("PhotoIndexer", "Failed to index ${photo.path}: ${e.message}")
                 failed++
+                onOutcome(PhotoIndexOutcome(photo.path, failureCode = e.javaClass.simpleName,
+                    ocrAttempted = channelPlan?.runOcr ?: true, clipAttempted = channelPlan?.runClip ?: true))
                 emit(IndexingProgress(
                     current = indexed + skipped + failed, // Update progress even on failure
                     total = total,
@@ -193,54 +251,80 @@ class PhotoIndexer(private val context: Context) {
             current = total,
             total = total,
             message = "Complete! Indexed: $indexed, Skipped: $skipped, Failed: $failed",
-            isComplete = true
+            isComplete = true,
+            indexed = indexed, skipped = skipped, failed = failed
         ))
+        }
     }.flowOn(Dispatchers.IO)
     
     /**
      * Index a single photo
      */
-    private suspend fun indexPhoto(photo: PhotoFile) {
-        android.util.Log.d("PhotoIndexer", "Indexing: ${photo.name}, imageEncoder: ${imageEncoder != null}")
-        
-        val bitmap = BitmapFactory.decodeFile(photo.path) ?: return
+    private suspend fun indexPhoto(photo: PhotoFile, plan: PhotoChannelWorkPlan? = null): PhotoIndexOutcome {
+        val existing = if (plan != null) vectorStore.getPhotoForVlmPath(photo.path) else null
+        val bitmap = BitmapFactory.decodeFile(photo.path) ?: error("image_decode_failed")
+        try {
         
         // Generate image embedding
-        val imageEmbedding = imageEncoder?.encode(bitmap)
+        val imageEmbedding = if (plan?.runClip != false) ModelResourceCoordinator.withClipResources {
+                if (imageEncoder == null) loadEncoders()
+                imageEncoder?.encode(bitmap)
+        } else null
         android.util.Log.d("PhotoIndexer", "Image embedding: ${imageEmbedding?.size ?: "null"}")
         
         // Run OCR
-        val ocrText = runOcr(photo.path)
-        android.util.Log.d("PhotoIndexer", "OCR text: ${ocrText?.take(30) ?: "null"}")
+        val ocr = if (plan?.runOcr != false) runOcr(photo.path) else
+            existing?.ocrText to true
+        val ocrText = ocr.first
+        diagnostics.event(if (plan?.reuseOcr == true) "ocr_reused" else "ocr_end", mapOf("photo_id" to diagnostics.safeId(photo.path), "success" to ocr.second, "nonempty" to !ocrText.isNullOrBlank()))
         
         // Generate text embedding for OCR text
-        val textEmbedding = if (!ocrText.isNullOrBlank()) {
-            textEncoder?.encode(ocrText)
+        val textEmbedding = if (plan?.runClip != false && !ocrText.isNullOrBlank()) {
+            ModelResourceCoordinator.withClipResources {
+                    if (textEncoder == null) loadEncoders()
+                    textEncoder?.encode(ocrText)
+            }
         } else null
         
         // Store in database
+        currentCoroutineContext().ensureActive()
+        check(File(photo.path).let { it.lastModified() == photo.lastModified && it.length() == photo.size }) {
+            "photo_changed_during_indexing"
+        }
         vectorStore.upsertPhoto(PhotoRecord(
+            folderId = existing?.folderId ?: 1,
             filePath = photo.path,
             fileName = photo.name,
-            dateTaken = photo.lastModified,
-            ocrText = ocrText,
+            dateTaken = existing?.takeIf { it.fileModified == photo.lastModified }?.dateTaken ?: photo.lastModified,
+            ocrText = when {
+                plan?.reuseOcr == true -> null
+                plan != null && ocr.second -> ocrText.orEmpty()
+                else -> ocrText
+            },
             imageEmbedding = imageEmbedding,
             textEmbedding = textEmbedding,
             fileModified = photo.lastModified
         ))
-        
-        bitmap.recycle()
+        diagnostics.event("db_write", mapOf("photo_id" to diagnostics.safeId(photo.path), "stage" to "ml"))
+        return PhotoIndexOutcome(photo.path, clipSucceeded = imageEmbedding != null || plan?.reuseClip == true,
+            ocrSucceeded = ocr.second, ocrNonempty = !ocrText.isNullOrBlank(),
+            ocrAttempted = plan?.runOcr ?: true, clipAttempted = plan?.runClip ?: true,
+            ocrTextSha256 = if (ocr.second && plan?.reuseOcr != true) OcrIndexProvenanceStore.textHash(ocrText.orEmpty()) else null)
+        } finally {
+            bitmap.recycle()
+        }
     }
     
     /**
      * Run OCR on an image
      */
-    private suspend fun runOcr(imagePath: String): String? {
+    private suspend fun runOcr(imagePath: String): Pair<String?, Boolean> {
+        diagnostics.event("ocr_start", mapOf("photo_id" to diagnostics.safeId(imagePath)))
         return suspendCancellableCoroutine { continuation ->
             try {
                 val bitmap = BitmapFactory.decodeFile(imagePath)
                 if (bitmap == null) {
-                    continuation.resume(null)
+                    continuation.resume(null to false)
                     return@suspendCancellableCoroutine
                 }
                 
@@ -250,14 +334,14 @@ class PhotoIndexer(private val context: Context) {
                     .addOnSuccessListener { result ->
                         val text = result.text.takeIf { it.isNotBlank() }
                         bitmap.recycle()
-                        continuation.resume(text)
+                        continuation.resume(text to true)
                     }
                     .addOnFailureListener { 
                         bitmap.recycle()
-                        continuation.resume(null)
+                        continuation.resume(null to false)
                     }
             } catch (e: Exception) {
-                continuation.resume(null)
+                continuation.resume(null to false)
             }
         }
     }
@@ -267,7 +351,12 @@ class PhotoIndexer(private val context: Context) {
      */
     fun search(query: String): List<PhotoSearchResult> {
         // Generate query embedding for image search
-        val queryEmbedding = textEncoder?.encode(query)
+        val queryEmbedding = try {
+            ModelResourceCoordinator.withClipResources {
+                if (textEncoder == null) loadEncoders()
+                textEncoder?.encode(query)
+            }
+        } catch (_: IllegalStateException) { null }
         
         // Hybrid search
         return vectorStore.hybridSearch(
@@ -296,9 +385,15 @@ class PhotoIndexer(private val context: Context) {
      */
     fun getVectorStore(): PhotoVectorStore = vectorStore
     
-    fun close() {
+    private fun releaseEncoders() {
         imageEncoder?.close()
         textEncoder?.close()
+        imageEncoder = null
+        textEncoder = null
+    }
+
+    fun close() {
+        ModelResourceCoordinator.releaseClipOwner(this)
         textRecognizer.close()
         vectorStore.close()
     }
@@ -326,7 +421,10 @@ data class IndexingProgress(
     val currentFile: String = "",
     val latencyMs: Long = 0,
     val imageSize: Long = 0,
-    val success: Boolean = true
+    val success: Boolean = true,
+    val indexed: Int = 0,
+    val skipped: Int = 0,
+    val failed: Int = 0
 ) {
     val progress: Float get() = if (total > 0) current.toFloat() / total else 0f
 }
@@ -337,4 +435,17 @@ data class IndexingProgress(
 data class IndexingStats(
     val totalPhotos: Int,
     val indexedPaths: Int
+)
+
+/** Outcome metadata never changes encoded inputs or ranking values. */
+data class PhotoIndexOutcome(
+    val path: String,
+    val skipped: Boolean = false,
+    val clipSucceeded: Boolean = false,
+    val ocrSucceeded: Boolean = false,
+    val ocrNonempty: Boolean = false,
+    val ocrTextSha256: String? = null,
+    val failureCode: String? = null,
+    val ocrAttempted: Boolean = false,
+    val clipAttempted: Boolean = false,
 )

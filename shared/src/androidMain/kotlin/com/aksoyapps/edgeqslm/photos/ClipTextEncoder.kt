@@ -4,6 +4,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
+import com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics
 import java.nio.LongBuffer
 
 /**
@@ -12,6 +13,7 @@ import java.nio.LongBuffer
  */
 class ClipTextEncoder(private val context: Context) {
     
+    private val diagnostics by lazy { ThesisDiagnostics.get(context) }
     private var ortEnv: OrtEnvironment? = null
     private var session: OrtSession? = null
     
@@ -25,20 +27,24 @@ class ClipTextEncoder(private val context: Context) {
      * Initialize the ONNX session with the CLIP text model
      */
     fun initialize(modelPath: String, vocabPath: String? = null): Boolean {
+        val started = System.nanoTime()
+        diagnostics.modelState("clip_text", "loading")
         return try {
             ortEnv = OrtEnvironment.getEnvironment()
             
-            val sessionOptions = OrtSession.SessionOptions()
-            sessionOptions.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            
-            session = ortEnv?.createSession(modelPath, sessionOptions)
+            OrtSession.SessionOptions().use { options ->
+                options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                session = ortEnv?.createSession(modelPath, options)
+            }
             
             vocabPath?.let { loadVocabulary(it) }
             
-            android.util.Log.d("ClipTextEncoder", "Model loaded from: $modelPath")
+            diagnostics.event("clip_text_load", mapOf("duration_ms" to (System.nanoTime() - started) / 1e6))
+            diagnostics.modelState("clip_text", "loaded")
             true
         } catch (e: Exception) {
             android.util.Log.e("ClipTextEncoder", "Failed to load model: ${e.message}", e)
+            diagnostics.modelState("clip_text", "load_failed")
             false
         }
     }
@@ -73,6 +79,7 @@ class ClipTextEncoder(private val context: Context) {
     fun encode(text: String): FloatArray? {
         val env = ortEnv ?: return null
         val sess = session ?: return null
+        val encodeStarted = System.nanoTime()
         
         try {
             val (inputIds, attentionMask) = tokenize(text)
@@ -81,26 +88,20 @@ class ClipTextEncoder(private val context: Context) {
             val attentionMaskBuffer = LongBuffer.wrap(attentionMask.map { it.toLong() }.toLongArray())
             
             val shape = longArrayOf(1, maxTokens.toLong())
-            val inputIdsTensor = OnnxTensor.createTensor(env, inputIdsBuffer, shape)
-            val attentionMaskTensor = OnnxTensor.createTensor(env, attentionMaskBuffer, shape)
-            
-            val inputs = mapOf(
-                "input_ids" to inputIdsTensor,
-                "attention_mask" to attentionMaskTensor
-            )
-            val results = sess.run(inputs)
-            
-            val output = results[0].value as Array<FloatArray>
-            val embedding = output[0]
-            
-            inputIdsTensor.close()
-            attentionMaskTensor.close()
-            results.close()
-            
-            return embedding
+            return OnnxTensor.createTensor(env, inputIdsBuffer, shape).use { inputIdsTensor ->
+                OnnxTensor.createTensor(env, attentionMaskBuffer, shape).use { attentionMaskTensor ->
+                    sess.run(mapOf("input_ids" to inputIdsTensor,
+                        "attention_mask" to attentionMaskTensor)).use { results ->
+                        val output = results[0].value as Array<FloatArray>
+                        output[0]
+                    }
+                }
+            }
         } catch (e: Exception) {
             android.util.Log.e("ClipTextEncoder", "Inference error: ${e.message}", e)
             return null
+        } finally {
+            diagnostics.event("clip_text_encode", mapOf("duration_ms" to (System.nanoTime() - encodeStarted) / 1e6))
         }
     }
     
@@ -122,7 +123,6 @@ class ClipTextEncoder(private val context: Context) {
         val words = cleanText.split(Regex("\\s+")).filter { it.isNotBlank() }
         var pos = 1
         
-        android.util.Log.d("ClipTextEncoder", "Tokenizing: '$text' -> words: $words")
         
         for (word in words) {
             if (pos >= maxTokens - 1) break
@@ -132,7 +132,6 @@ class ClipTextEncoder(private val context: Context) {
             val wordWithSuffix = "$word</w>"
             val tokenId = vocab?.get(wordWithSuffix) ?: vocab?.get(word) ?: 0
             
-            android.util.Log.d("ClipTextEncoder", "Word: '$word' -> tokenId: $tokenId (tried: '$wordWithSuffix')")
             
             if (tokenId > 0) {
                 inputIds[pos] = tokenId
@@ -147,16 +146,15 @@ class ClipTextEncoder(private val context: Context) {
             attentionMask[pos] = 1
         }
         
-        android.util.Log.d("ClipTextEncoder", "Final tokens: ${inputIds.take(pos + 1).toList()}")
         
         return Pair(inputIds, attentionMask)
     }
     
     fun close() {
         session?.close()
-        ortEnv?.close()
         session = null
         ortEnv = null
+        diagnostics.modelState("clip_text", "closed")
     }
     
     companion object {

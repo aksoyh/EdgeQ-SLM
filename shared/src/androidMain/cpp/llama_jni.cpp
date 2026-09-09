@@ -17,9 +17,11 @@
 #include <string>
 #include <vector>
 
+#include "chat.h"
 #include "common.h"
 #include "llama.h"
 #include "mtmd.h"
+#include "mtmd-helper.h"
 #include "sampling.h"
 
 #define LOG_TAG "LlamaJNI"
@@ -38,6 +40,26 @@ static bool g_is_vision_model = false;
 static long g_prefill_time_ms = 0;
 static long g_decode_time_ms = 0;
 static int g_tokens_generated = 0;
+
+static void release_model() {
+  if (g_mtmd_ctx) {
+    mtmd_free(g_mtmd_ctx);
+    g_mtmd_ctx = nullptr;
+  }
+  g_is_vision_model = false;
+  if (g_context) {
+    llama_free(g_context);
+    g_context = nullptr;
+  }
+  if (g_model) {
+    llama_model_free(g_model);
+    g_model = nullptr;
+  }
+  g_vocab = nullptr;
+  g_prefill_time_ms = 0;
+  g_decode_time_ms = 0;
+  g_tokens_generated = 0;
+}
 
 // ChatML template helper
 static std::string apply_chat_template(const std::string &prompt) {
@@ -85,14 +107,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
   LOGI("JNI_OnUnload: Cleaning up");
-  if (g_context) {
-    llama_free(g_context);
-    g_context = nullptr;
-  }
-  if (g_model) {
-    llama_model_free(g_model);
-    g_model = nullptr;
-  }
+  release_model();
   llama_backend_free();
 }
 
@@ -100,6 +115,7 @@ JNIEXPORT jboolean JNICALL
 Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_loadModelNative(
     JNIEnv *env, jobject thiz, jstring modelPath) {
 
+  release_model();
   const char *path = env->GetStringUTFChars(modelPath, nullptr);
   if (!path) {
     LOGE("loadModelNative: Failed to get path");
@@ -108,19 +124,9 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_loadModelNative(
 
   LOGI("loadModelNative: Loading model from %s", path);
 
-  if (g_context) {
-    llama_free(g_context);
-    g_context = nullptr;
-  }
-  if (g_model) {
-    llama_model_free(g_model);
-    g_model = nullptr;
-  }
-
   llama_model_params model_params = llama_model_default_params();
   model_params.n_gpu_layers = 0;
-  model_params.use_mmap = true;
-  model_params.use_mlock = false;
+  model_params.load_mode = LLAMA_LOAD_MODE_MMAP;
 
   auto start = std::chrono::high_resolution_clock::now();
   g_model = llama_model_load_from_file(path, model_params);
@@ -151,8 +157,7 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_loadModelNative(
   g_context = llama_init_from_model(g_model, ctx_params);
   if (!g_context) {
     LOGE("loadModelNative: Failed to create context");
-    llama_model_free(g_model);
-    g_model = nullptr;
+    release_model();
     return JNI_FALSE;
   }
 
@@ -229,7 +234,8 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_generateNative(
   llama_sampler *sampler = llama_sampler_chain_init(sparams);
 
   llama_sampler_chain_add(
-      sampler, llama_sampler_init_penalties(64, repeatPenalty, 0.0f, 0.0f));
+      sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(g_vocab), 64,
+                                            repeatPenalty, 0.0f, 0.0f));
   llama_sampler_chain_add(sampler, llama_sampler_init_top_p(topP, 1));
   llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
   llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
@@ -289,26 +295,7 @@ JNIEXPORT void JNICALL
 Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_unloadNative(JNIEnv *env,
                                                                jobject thiz) {
   LOGI("unloadNative: Unloading");
-
-  // Cleanup vision context first
-  if (g_mtmd_ctx) {
-    mtmd_free(g_mtmd_ctx);
-    g_mtmd_ctx = nullptr;
-  }
-  g_is_vision_model = false;
-
-  if (g_context) {
-    llama_free(g_context);
-    g_context = nullptr;
-  }
-  if (g_model) {
-    llama_model_free(g_model);
-    g_model = nullptr;
-  }
-  g_vocab = nullptr;
-  g_prefill_time_ms = 0;
-  g_decode_time_ms = 0;
-  g_tokens_generated = 0;
+  release_model();
   LOGI("unloadNative: Done");
 }
 
@@ -360,6 +347,7 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_loadVisionProjectorNative(
     mtmd_free(g_mtmd_ctx);
     g_mtmd_ctx = nullptr;
   }
+  g_is_vision_model = false;
 
   // Initialize mtmd context
   mtmd_context_params mtmd_params = mtmd_context_params_default();
@@ -389,6 +377,11 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_loadVisionProjectorNative(
   LOGI("loadVisionProjectorNative: Vision support: %s",
        g_is_vision_model ? "YES" : "NO");
 
+  if (!g_is_vision_model) {
+    mtmd_free(g_mtmd_ctx);
+    g_mtmd_ctx = nullptr;
+  }
+
   return g_is_vision_model ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -401,173 +394,220 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_isVisionModelLoadedNative(
 JNIEXPORT jstring JNICALL
 Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_analyzeImageNative(
     JNIEnv *env, jobject thiz, jbyteArray imageData, jint width, jint height,
-    jstring prompt, jint maxTokens, jfloat temperature) {
+    jstring prompt, jint maxTokens) {
 
   if (!g_model || !g_context || !g_vocab || !g_mtmd_ctx || !g_is_vision_model) {
     LOGE("analyzeImageNative: Vision model not loaded");
     return env->NewStringUTF("[Error: Vision model not loaded]");
   }
 
-  // Get image data (RGB format, 3 bytes per pixel)
-  jsize dataLen = env->GetArrayLength(imageData);
-  jbyte *imgBytes = env->GetByteArrayElements(imageData, nullptr);
-  if (!imgBytes || dataLen != width * height * 3) {
-    LOGE("analyzeImageNative: Invalid image data (len=%d, expected=%d)",
-         dataLen, width * height * 3);
-    if (imgBytes)
-      env->ReleaseByteArrayElements(imageData, imgBytes, 0);
-    return env->NewStringUTF("[Error: Invalid image data]");
+  const jsize data_len = env->GetArrayLength(imageData);
+  if (width <= 0 || height <= 0 ||
+      static_cast<int64_t>(width) * height * 3 != data_len || maxTokens != 320) {
+    return env->NewStringUTF("[Error: Invalid image data or token budget]");
   }
 
-  const char *prompt_cstr = env->GetStringUTFChars(prompt, nullptr);
-  if (!prompt_cstr) {
-    env->ReleaseByteArrayElements(imageData, imgBytes, 0);
-    return env->NewStringUTF("[Error: Invalid prompt]");
-  }
+  try {
+    auto release_bytes = [env, imageData](jbyte *bytes) {
+      env->ReleaseByteArrayElements(imageData, bytes, JNI_ABORT);
+    };
+    std::unique_ptr<jbyte, decltype(release_bytes)> image_bytes(
+        env->GetByteArrayElements(imageData, nullptr), release_bytes);
+    if (!image_bytes) return nullptr;
 
-  LOGI("analyzeImageNative: Image %dx%d, prompt='%s', maxTokens=%d", width,
-       height, prompt_cstr, maxTokens);
+    auto release_prompt = [env, prompt](const char *chars) {
+      env->ReleaseStringUTFChars(prompt, chars);
+    };
+    std::unique_ptr<const char, decltype(release_prompt)> prompt_chars(
+        env->GetStringUTFChars(prompt, nullptr), release_prompt);
+    if (!prompt_chars) return nullptr;
 
-  auto start = std::chrono::high_resolution_clock::now();
+    std::string prompt_content(prompt_chars.get());
+    prompt_chars.reset();
+    LOGI("analyzeImageNative: invocation contract=android_q5_vlm_candidate_contract_v4 "
+         "image=%dx%d raw_prompt_bytes=%zu maxTokens=%d",
+         width, height, prompt_content.size(), maxTokens);
 
-  // Create bitmap from image data
-  mtmd_bitmap *bitmap = mtmd_bitmap_init((uint32_t)width, (uint32_t)height,
-                                         (const unsigned char *)imgBytes);
-
-  if (!bitmap) {
-    LOGE("analyzeImageNative: Failed to create bitmap");
-    env->ReleaseByteArrayElements(imageData, imgBytes, 0);
-    env->ReleaseStringUTFChars(prompt, prompt_cstr);
-    return env->NewStringUTF("[Error: Failed to create bitmap]");
-  }
-
-  // Create input text with image marker and ChatML template
-  // Qwen2.5-VL expects ChatML format for proper response generation
-  std::string prompt_with_marker =
-      "<|im_start|>user\n" + std::string(mtmd_default_marker()) + "\n" +
-      prompt_cstr + "<|im_end|>\n<|im_start|>assistant\n";
-  mtmd_input_text input_text = {.text = prompt_with_marker.c_str(),
-                                .add_special =
-                                    false, // We're adding template manually
-                                .parse_special = true};
-
-  // Tokenize with image
-  mtmd_input_chunks *chunks = mtmd_input_chunks_init();
-  const mtmd_bitmap *bitmaps[] = {bitmap};
-
-  int32_t tokenize_result =
-      mtmd_tokenize(g_mtmd_ctx, chunks, &input_text, bitmaps, 1);
-
-  env->ReleaseByteArrayElements(imageData, imgBytes, 0);
-  env->ReleaseStringUTFChars(prompt, prompt_cstr);
-
-  if (tokenize_result != 0) {
-    LOGE("analyzeImageNative: Tokenization failed (err=%d)", tokenize_result);
-    mtmd_bitmap_free(bitmap);
-    mtmd_input_chunks_free(chunks);
-    return env->NewStringUTF("[Error: Image tokenization failed]");
-  }
-
-  // Clear context and encode chunks
-  llama_memory_clear(llama_get_memory(g_context), true);
-
-  size_t n_chunks = mtmd_input_chunks_size(chunks);
-  LOGD("analyzeImageNative: Processing %zu chunks", n_chunks);
-
-  for (size_t i = 0; i < n_chunks; i++) {
-    const mtmd_input_chunk *chunk = mtmd_input_chunks_get(chunks, i);
-    mtmd_input_chunk_type chunk_type = mtmd_input_chunk_get_type(chunk);
-
-    if (chunk_type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
-      size_t n_tokens = 0;
-      const llama_token *tokens =
-          mtmd_input_chunk_get_tokens_text(chunk, &n_tokens);
-
-      llama_batch batch = llama_batch_get_one((llama_token *)tokens, n_tokens);
-      if (llama_decode(g_context, batch) != 0) {
-        LOGE("analyzeImageNative: Text decode failed");
-        mtmd_bitmap_free(bitmap);
-        mtmd_input_chunks_free(chunks);
-        return env->NewStringUTF("[Error: Text decode failed]");
-      }
-    } else if (chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
-      // Encode image chunk
-      if (mtmd_encode_chunk(g_mtmd_ctx, chunk) != 0) {
-        LOGE("analyzeImageNative: Image encode failed");
-        mtmd_bitmap_free(bitmap);
-        mtmd_input_chunks_free(chunks);
-        return env->NewStringUTF("[Error: Image encode failed]");
-      }
-
-      size_t chunk_n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
-      LOGD("analyzeImageNative: Image chunk encoded (%zu tokens)",
-           chunk_n_tokens);
-    }
-  }
-
-  // Generate response
-  g_prefill_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::high_resolution_clock::now() - start)
-                          .count();
-  g_decode_time_ms = 0;
-  g_tokens_generated = 0;
-
-  auto decode_start = std::chrono::high_resolution_clock::now();
-
-  llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
-  llama_sampler *sampler = llama_sampler_chain_init(sparams);
-  llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
-  llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-
-  std::string output;
-  output.reserve(maxTokens * 8);
-  llama_token eos_token = llama_vocab_eos(g_vocab);
-
-  for (int i = 0; i < maxTokens; i++) {
-    llama_token new_token = llama_sampler_sample(sampler, g_context, -1);
-
-    if (new_token == eos_token || llama_vocab_is_eog(g_vocab, new_token)) {
-      LOGD("analyzeImageNative: EOS at %d", i);
-      break;
+    auto start = std::chrono::high_resolution_clock::now();
+    mtmd::bitmap_ptr bitmap(mtmd_bitmap_init(
+        static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+        reinterpret_cast<const unsigned char *>(image_bytes.get())));
+    image_bytes.reset();
+    if (!bitmap) {
+      return env->NewStringUTF("[Error: Failed to create bitmap]");
     }
 
-    char buf[256];
-    int len =
-        llama_token_to_piece(g_vocab, new_token, buf, sizeof(buf), 0, true);
-    if (len > 0) {
-      output.append(buf, len);
-      if (has_stop_token(output)) {
-        LOGD("analyzeImageNative: Stop token at %d", i);
+    if (prompt_content.size() != 917 || prompt_content.back() != '\n') {
+      LOGE("analyzeImageNative: V4 prompt contract failed (bytes=%zu)",
+           prompt_content.size());
+      return env->NewStringUTF("[Error: V4 prompt contract failed]");
+    }
+    prompt_content.pop_back();
+
+    const char *native_template = llama_model_chat_template(g_model, nullptr);
+    if (!native_template) {
+      return env->NewStringUTF("[Error: Missing native chat template]");
+    }
+
+    const std::string marker = mtmd_default_marker();
+    const std::string user_content = marker + prompt_content;
+    const std::string bos_piece =
+        common_token_to_piece(g_vocab, llama_vocab_bos(g_vocab), true);
+    const std::string eos_piece =
+        common_token_to_piece(g_vocab, llama_vocab_eos(g_vocab), true);
+    auto templates = common_chat_templates_init(
+        nullptr, native_template, bos_piece, eos_piece);
+    common_chat_msg user_message;
+    user_message.role = "user";
+    user_message.content = user_content;
+    common_chat_templates_inputs template_inputs;
+    template_inputs.messages = {user_message};
+    template_inputs.add_generation_prompt = true;
+    template_inputs.use_jinja = true;
+    const std::string prompt_with_marker =
+        common_chat_templates_apply(templates.get(), template_inputs).prompt;
+    LOGI("analyzeImageNative: V4 prompt contract raw_bytes=917 "
+         "user_content_bytes=%zu terminal_lf_excluded=1 native_template=1 "
+         "media_prompt_separator_bytes=0 add_special=1 rendered_bytes=%zu",
+         prompt_content.size(), prompt_with_marker.size());
+
+    mtmd_input_text input_text = {.text = prompt_with_marker.c_str(),
+                                 .text_len = prompt_with_marker.size(),
+                                 .add_special = true,
+                                 .parse_special = true};
+    mtmd::input_chunks_ptr chunks(mtmd_input_chunks_init());
+    const mtmd_bitmap *bitmaps[] = {bitmap.get()};
+    const int32_t tokenize_result =
+        mtmd_tokenize(g_mtmd_ctx, chunks.get(), &input_text, bitmaps, 1);
+    if (tokenize_result != 0) {
+      LOGE("analyzeImageNative: Tokenization failed (err=%d)", tokenize_result);
+      return env->NewStringUTF("[Error: Image tokenization failed]");
+    }
+
+    llama_memory_clear(llama_get_memory(g_context), true);
+    const size_t n_chunks = mtmd_input_chunks_size(chunks.get());
+    std::vector<llama_token> prefill_text_tokens;
+    size_t image_chunks = 0;
+    size_t leading_bos_tokens = 0;
+    const llama_token bos_token = llama_vocab_bos(g_vocab);
+    for (size_t i = 0; i < n_chunks; i++) {
+      const mtmd_input_chunk *chunk = mtmd_input_chunks_get(chunks.get(), i);
+      const mtmd_input_chunk_type type = mtmd_input_chunk_get_type(chunk);
+      if (type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+        size_t n_tokens = 0;
+        const llama_token *tokens =
+            mtmd_input_chunk_get_tokens_text(chunk, &n_tokens);
+        if (n_tokens > 0) {
+          prefill_text_tokens.insert(prefill_text_tokens.end(), tokens,
+                                     tokens + n_tokens);
+        }
+        if (i == 0) {
+          while (leading_bos_tokens < n_tokens &&
+                 tokens[leading_bos_tokens] == bos_token) {
+            leading_bos_tokens++;
+          }
+        }
+        LOGI("analyzeImageNative: V4 chunk[%zu]=text tokens=%zu", i, n_tokens);
+      } else if (type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+        image_chunks++;
+        LOGI("analyzeImageNative: V4 chunk[%zu]=image tokens=%zu", i,
+             mtmd_input_chunk_get_n_tokens(chunk));
+      } else {
+        LOGI("analyzeImageNative: V4 chunk[%zu]=audio tokens=%zu", i,
+             mtmd_input_chunk_get_n_tokens(chunk));
+      }
+    }
+    LOGI("analyzeImageNative: V4 chunks=%zu image_chunks=%zu "
+         "leading_bos_tokens=%zu prefill_text_tokens=%zu",
+         n_chunks, image_chunks, leading_bos_tokens, prefill_text_tokens.size());
+
+    llama_pos n_past = 0;
+    LOGI("analyzeImageNative: Calling mtmd_helper_eval_chunks for V4 multimodal prefill");
+    const int32_t eval_result = mtmd_helper_eval_chunks(
+        g_mtmd_ctx, g_context, chunks.get(), n_past, 0,
+        static_cast<int32_t>(llama_n_batch(g_context)), true, &n_past);
+    if (eval_result != 0) {
+      LOGE("analyzeImageNative: Multimodal prefill failed (err=%d)", eval_result);
+      return env->NewStringUTF("[Error: Multimodal prefill failed]");
+    }
+    LOGI("analyzeImageNative: V4 multimodal prefill success "
+         "final_n_past=%d; generation may begin", n_past);
+
+    g_prefill_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::high_resolution_clock::now() - start)
+                            .count();
+    g_decode_time_ms = 0;
+    g_tokens_generated = 0;
+    const auto decode_start = std::chrono::high_resolution_clock::now();
+
+    common_params_sampling sampling_params;
+    sampling_params.seed = 42;
+    sampling_params.temp = 0.0f;
+    sampling_params.n_prev = 64;
+    sampling_params.penalty_last_n = 64;
+    sampling_params.penalty_repeat = 1.05f;
+    std::unique_ptr<common_sampler, decltype(&common_sampler_free)> sampler(
+        common_sampler_init(g_model, sampling_params), common_sampler_free);
+    if (!sampler) {
+      return env->NewStringUTF("[Error: Sampler initialization failed]");
+    }
+    for (llama_token token : prefill_text_tokens) {
+      common_sampler_accept(sampler.get(), token, false);
+    }
+    LOGI("analyzeImageNative: V4 sampler seed=42 temp=0 "
+         "repeat_penalty=1.05 last_n=64 prompt_text_tokens_accepted=%zu "
+         "image_positions_accepted=0 chain='%s'",
+         prefill_text_tokens.size(), common_sampler_print(sampler.get()).c_str());
+
+    std::string output;
+    output.reserve(maxTokens * 8);
+    const llama_token eos_token = llama_vocab_eos(g_vocab);
+    for (int i = 0; i < maxTokens; i++) {
+      const llama_token new_token =
+          common_sampler_sample(sampler.get(), g_context, -1);
+      common_sampler_accept(sampler.get(), new_token, true);
+      if (new_token == eos_token || llama_vocab_is_eog(g_vocab, new_token)) {
+        LOGD("analyzeImageNative: EOS at %d", i);
         break;
       }
+
+      char buf[256];
+      const int len =
+          llama_token_to_piece(g_vocab, new_token, buf, sizeof(buf), 0, true);
+      if (len < 0) {
+        return env->NewStringUTF("[Error: Token piece exceeds output buffer]");
+      }
+      if (len > 0) {
+        output.append(buf, len);
+        if (has_stop_token(output)) {
+          LOGD("analyzeImageNative: Stop token at %d", i);
+          break;
+        }
+      }
+
+      llama_token decode_token = new_token;
+      llama_batch next_batch = llama_batch_get_one(&decode_token, 1);
+      if (llama_decode(g_context, next_batch) != 0) {
+        LOGE("analyzeImageNative: Decode failed at %d", i);
+        return env->NewStringUTF("[Error: Vision generation decode failed]");
+      }
+      g_tokens_generated++;
     }
 
-    llama_batch next_batch = llama_batch_get_one(&new_token, 1);
-    if (llama_decode(g_context, next_batch) != 0) {
-      LOGE("analyzeImageNative: Decode failed at %d", i);
-      break;
-    }
-    g_tokens_generated++;
+    g_decode_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::high_resolution_clock::now() - decode_start)
+                           .count();
+    const std::string clean_output = trim_stop_tokens(output);
+    const float tokens_per_sec = g_decode_time_ms > 0
+                                     ? (g_tokens_generated * 1000.0f / g_decode_time_ms)
+                                     : 0.0f;
+    LOGI("analyzeImageNative: %d tokens in %ld ms (%.2f tok/s)",
+         g_tokens_generated, g_decode_time_ms, tokens_per_sec);
+    return env->NewStringUTF(clean_output.c_str());
+  } catch (const std::exception &error) {
+    LOGE("analyzeImageNative: V4 inference failed: %s", error.what());
+    return env->NewStringUTF("[Error: V4 inference failed]");
   }
-
-  llama_sampler_free(sampler);
-  mtmd_bitmap_free(bitmap);
-  mtmd_input_chunks_free(chunks);
-
-  auto decode_end = std::chrono::high_resolution_clock::now();
-  g_decode_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         decode_end - decode_start)
-                         .count();
-
-  std::string clean_output = trim_stop_tokens(output);
-
-  float tokens_per_sec = g_decode_time_ms > 0
-                             ? (g_tokens_generated * 1000.0f / g_decode_time_ms)
-                             : 0.0f;
-  LOGI("analyzeImageNative: %d tokens in %ld ms (%.2f tok/s)",
-       g_tokens_generated, g_decode_time_ms, tokens_per_sec);
-
-  return env->NewStringUTF(clean_output.c_str());
 }
 
 } // extern "C"

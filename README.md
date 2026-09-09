@@ -16,7 +16,8 @@ This project serves as the implementation component for the Master's thesis:
 ## Features
 
 - **On-Device LLM Inference:** Runs quantized GGUF models (Qwen 1.5 1.8B) entirely offline using llama.cpp.
-- **Photo Search:** Hybrid OCR + CLIP visual search for on-device photo retrieval.
+- **Photo Search — Three Retrieval Modes:** ML (CLIP+OCR embeddings), VLM (vision-language captioning), and SLM (TinyLlama query planner with deterministic enrichment).
+- **SLM Planner:** A quantized TinyLlama model interprets the user's query and produces a structured JSON search plan, which is then used for weighted keyword retrieval over the local photo index. This works without any internet connection or cloud API.
 - **Benchmark Framework:** Systematic performance measurement with configurable experiments.
 - **Performance Metrics:** Real-time display of TTFT, tokens/sec, memory, and CPU usage.
 - **Export & Analysis:** CSV/JSON export for statistical analysis in Python or Julia.
@@ -133,13 +134,18 @@ adb install composeApp/build/outputs/apk/debug/composeApp-debug.apk
 ### Model Deployment
 
 ```bash
-# LLM Model (~1.8 GB) - download in-app or push manually
+# LLM Chat Model (~1.8 GB) - download in-app or push manually
 adb push qwen-q8_0.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
 
-# CLIP Models (~660 MB) for visual search
+# CLIP Models (~660 MB) for ML-based visual search
 adb push clip-vit-b32-image.onnx /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
 adb push clip-vit-b32-text.onnx /sdcard/Android/data/com.aksoyapps.edgeqslm/files/models/
+
+# SLM Planner Model (~700 MB) for structured query planning
+adb push edgeq_planner_tinyllama_q4_k_m.gguf /sdcard/Android/data/com.aksoyapps.edgeqslm/files/
 ```
+
+The SLM planner model is optional. If the file is not present, the SLM button in the photo search screen stays disabled. The app will fall back to ML or VLM mode without any errors.
 
 ---
 
@@ -193,12 +199,25 @@ The `/screenshots_of_the_app/` directory contains screenshots demonstrating:
 
 ---
 
+## Implementation Notes
+
+**On-demand model loading**
+
+The VLM and SLM models are not loaded at app startup. They are loaded on demand when the user taps the corresponding button in the photo search screen. This is by design: the JNI bridge for llama.cpp uses a single set of global native pointers (`g_model`, `g_context`), so loading two models concurrently causes the second load to free the first model's memory, resulting in a SIGSEGV crash. Loading lazily means only one model is ever in the native layer at a time.
+
+The buttons reflect this with a `↓` indicator when the model file is present but not yet loaded, a spinner while loading, and no indicator when ready. After loading completes, any pending query runs automatically.
+
+See [docs/README_FOR_SUPERVISOR.md](docs/README_FOR_SUPERVISOR.md) (Phase 4b) for the full analysis.
+
+---
+
 ## Known Limitations
 
 1. **Single Device Testing:** Results are device-specific.
 2. **Quantized Models Only:** No unquantized baseline due to memory constraints.
 3. **Process CPU Only:** Android restrictions prevent system-wide CPU measurement.
 4. **Sanity Checks ≠ Full Benchmarks:** Output quality is approximated, not formally evaluated.
+5. **One llama.cpp Model at a Time:** The native JNI bridge uses global state, so VLM and SLM cannot be loaded simultaneously. Switching between them requires unloading one first — this is handled automatically but it means the first switch after install always has a loading delay.
 
 ---
 
@@ -208,6 +227,7 @@ The `/screenshots_of_the_app/` directory contains screenshots demonstrating:
 - Multi-device benchmark study
 - NPU acceleration testing
 - iOS implementation
+- Fine-tuning the TinyLlama planner on a photo-specific query dataset to improve JSON output reliability at Q4 quantization
 
 ---
 
@@ -223,4 +243,4 @@ MIT License
 **Institution:** SGH Warsaw School of Economics  
 **Contact:** ha140130@student.sgh.waw.pl | aksoy.android@gmail.com  
 **Repository:** [github.com/aksoyh/edgeq-slm](https://github.com/aksoyh/edgeq-slm)  
-**Date:** January 2026
+**Date:** June 2026

@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.UUID
 
 /**
  * ViewModel for Photo Search functionality
@@ -30,9 +31,12 @@ class PhotoSearchViewModel(private val context: Context) {
     
     private val scope = CoroutineScope(Dispatchers.Main)
     private var photoIndexer: PhotoIndexer? = null
+    private var thesisSearchEngine: ThesisSearchEngine? = null
+    @Volatile private var safeDetailRecords: Map<String, PhotoRecord> = emptyMap()
     private var indexingJob: Job? = null
     private val selectionStore = PhotoSelectionStore(context)
     private var readinessJob: Job? = null
+    private var readinessCoverageSnapshot: Triple<Int, Int, Int>? = null
     @Volatile private var retainedVlmDiagnostics: Map<String, VlmSourceDiagnostic> = emptyMap()
     val selection: ThesisPhotoSelection? get() = selectionStore.snapshot()
     
@@ -74,8 +78,10 @@ class PhotoSearchViewModel(private val context: Context) {
     }
     
     private fun initialize() {
+        _uiState.value = _uiState.value.copy(searchScope = selectionStore.searchScope())
         scope.launch {
             ModelDelivery(context).busyState.collect { busy ->
+                _uiState.value = _uiState.value.copy(isModelOperationActive = busy)
                 if (busy) _uiState.value = _uiState.value.copy(indexingBlockReason = "Wait for the active model operation to finish before indexing.")
                 else refreshModeAvailability()
             }
@@ -87,6 +93,22 @@ class PhotoSearchViewModel(private val context: Context) {
         }
     }
 
+    @Synchronized
+    private fun searchEngine(): ThesisSearchEngine = thesisSearchEngine ?: ThesisSearchEngine(
+        context.applicationContext, requireNotNull(photoIndexer?.getVectorStore()) { "Index is unavailable" }
+    ).also { thesisSearchEngine = it }
+
+    fun invalidateQueryModels() {
+        scope.launch(Dispatchers.IO) {
+            thesisSearchEngine?.invalidateQueryModels()
+            refreshModeAvailability()
+        }
+    }
+
+    fun releaseQueryResources() {
+        scope.launch(Dispatchers.IO) { thesisSearchEngine?.close() }
+    }
+
     fun refreshModeAvailability() {
         readinessJob?.cancel()
         readinessJob = scope.launch(Dispatchers.IO) {
@@ -96,32 +118,51 @@ class PhotoSearchViewModel(private val context: Context) {
                     _uiState.value = _uiState.value.copy(indexingBlockReason = "Wait for the active model operation to finish before indexing.")
                     return@launch
                 }
-                val modes = ThesisSearchEngine(context.applicationContext, store).availability()
                 val selected = selectionStore.snapshot()
+                val modeScope = _uiState.value.searchScope
+                val modes = searchEngine().availability(PhotoSearchScope.eligiblePaths(modeScope, selected?.photos.orEmpty().map { it.path }))
                 val session = ThesisIndexingStateStore(context).snapshot()
-                val readiness = ThesisIndexingReadiness.inspect(context, selected?.photos.orEmpty().map { it.path }, true)
-                if (ModelDelivery(context).isBusy) return@launch
                 val sameSelection = selected != null && session != null && session.sessionId == selected.sessionId &&
                     session.selectedPaths == selected.photos.map { it.path }
+                val indexContext = continuationIndexContext(session?.takeIf { sameSelection },
+                    selected?.photos.orEmpty().map { it.path })
+                val readiness = ThesisIndexingReadiness.inspect(indexContext,
+                    selected?.photos.orEmpty().map { it.path }, true, modelContext = context)
+                if (ModelDelivery(context).isBusy || modeScope != _uiState.value.searchScope || selected != selectionStore.snapshot()) return@launch
                 _uiState.value = _uiState.value.copy(
                     enabledThesisModes = modes.filter { it.enabled }.map { it.mode }.toSet(),
                     modeReasons = modes.associate { it.mode to it.reason },
+                    modeReadiness = modes.associateBy { it.mode },
                     canCompleteMissingChannels = sameSelection && session?.canRequestCompletion == true && readiness.canComplete,
                     missingChannelSummary = readiness.summary,
                     indexingBlockReason = "",
                 )
             } catch (cancelled: CancellationException) { throw cancelled
+            } catch (failure: SavedReindexProgressUnavailable) {
+                _uiState.value = _uiState.value.copy(canCompleteMissingChannels = false,
+                    indexingBlockReason = requireNotNull(failure.message))
             } catch (failure: Exception) {
                 _uiState.value = _uiState.value.copy(indexingBlockReason = "Index/model status could not be checked (${failure.javaClass.simpleName}). Refresh or inspect Diagnostics.")
             }
         }
     }
 
-    fun prepareIndexingStart(completeMissing: Boolean, onReady: (ThesisIndexingSession) -> Unit) {
+    fun prepareIndexingStart(
+        completeMissing: Boolean,
+        reindexSelection: SelectionReindexConfirmation? = null,
+        onReady: (ThesisIndexingSession) -> Unit,
+    ) {
         val current = _uiState.value
-        if (current.isIndexing || current.isVlmIndexing || current.isSelectingPhotos || current.isIndexingPreflight) return
+        if (current.isIndexing || current.isVlmIndexing || current.isSelectingPhotos || current.isIndexingPreflight ||
+            current.isSearching || current.isModelOperationActive || current.isModelLoading || current.isVlmLoading || current.isSlmLoading) return
         val selected = selectionStore.snapshot()
         if (selected == null || selected.photos.isEmpty()) { reportError("Choose photos before indexing"); return }
+        if (!selected.reviewed) { reportError("Review and confirm the selected photos before indexing"); return }
+        val selectedPaths = selected.photos.map { it.path }
+        if (reindexSelection != null && (completeMissing || !reindexSelection.matches(selected.sessionId, selectedPaths))) {
+            reportError("The selection changed. Hold Index again and confirm the current photos before reindexing.")
+            return
+        }
         _uiState.value = current.copy(isIndexingPreflight = true, indexingBlockReason = "", error = null)
         scope.launch {
             try {
@@ -129,24 +170,53 @@ class PhotoSearchViewModel(private val context: Context) {
                     check(!ModelDelivery(context).isBusy) { "Wait for the active model operation to finish before indexing." }
                     check(selected.photos.all { File(it.path).let { file -> file.isFile && file.canRead() } }) { "Some selected photos are unavailable. Choose a readable source before indexing." }
                     val existing = ThesisIndexingStateStore(context).snapshot()
-                    val readiness = ThesisIndexingReadiness.inspect(context, selected.photos.map { it.path }, true)
+                    check(existing?.isRunning != true) { "An indexing session is already active." }
+                    val continuation = if (reindexSelection == null)
+                        existing.continueSelectedReindex(selected.sessionId, selectedPaths) else null
+                    if (continuation != null) continuationIndexContext(continuation, selectedPaths)
                     if (completeMissing) {
                         check(existing?.canRequestCompletion == true && existing.sessionId == selected.sessionId &&
-                            existing.selectedPaths == selected.photos.map { it.path }) { "The completed session no longer matches the selected photos." }
+                            existing.selectedPaths == selectedPaths) { "The saved indexing session no longer matches the selected photos." }
+                        val indexContext = continuationIndexContext(existing, selectedPaths)
+                        val readiness = ThesisIndexingReadiness.inspect(indexContext, selectedPaths, true, modelContext = context)
                         check(readiness.canComplete) { readiness.summary }
                     }
                     check(!ModelDelivery(context).isBusy) { "A model operation started. Finish it before indexing." }
-                    if (completeMissing) requireNotNull(existing).copy(completeMissingChannels = true) else
-                        ThesisIndexingSession(sessionId = selected.sessionId, selectedPaths = selected.photos.map { it.path }, includeSemantic = true)
+                    when {
+                        completeMissing -> requireNotNull(existing).copy(completeMissingChannels = true, resumeInterruptedSources = true)
+                        continuation != null -> continuation
+                        else -> ThesisIndexingSession(sessionId = selected.sessionId, selectedPaths = selectedPaths, includeSemantic = true,
+                            reindexRequestId = if (reindexSelection != null) UUID.randomUUID().toString() else null)
+                    }
                 }
+                check(selected == selectionStore.snapshot()) { "The selection changed. Review and confirm the current photos before indexing." }
+                check(!_uiState.value.isSearching && !ModelDelivery(context).isBusy) { "Finish the active search or model operation before indexing." }
                 onReady(session)
-                _uiState.value = _uiState.value.copy(isIndexing = true, indexingMessage = "Starting selected photos", canCompleteMissingChannels = false)
+                _uiState.value = _uiState.value.copy(isIndexing = true,
+                    indexingMessage = if (reindexSelection != null) "Preparing replacement index for selected photos" else "Starting selected photos",
+                    canCompleteMissingChannels = false)
             } catch (cancelled: CancellationException) { throw cancelled
             } catch (failure: Exception) {
                 _uiState.value = _uiState.value.copy(indexingBlockReason = failure.message ?: "Indexing preflight failed.")
             } finally { _uiState.value = _uiState.value.copy(isIndexingPreflight = false) }
         }
     }
+
+    private fun continuationIndexContext(session: ThesisIndexingSession?, paths: List<String>): Context {
+        val requestId = session?.reindexRequestId ?: return context
+        if (!session.reindexWorkspaceInitialized) return context
+        try {
+            val workspace = ReindexWorkspace(context, requestId)
+            workspace.requireSelection(paths)
+            return workspace.indexContext
+        } catch (failure: Exception) {
+            throw SavedReindexProgressUnavailable(failure)
+        }
+    }
+
+    private class SavedReindexProgressUnavailable(cause: Exception) : IllegalStateException(
+        "Saved reindex progress unavailable; hold Index to start a new confirmed request. Your previous index is kept.", cause,
+    )
 
     fun setThesisMode(mode: ThesisSearchMode) {
         if (mode !in _uiState.value.enabledThesisModes) return
@@ -155,22 +225,61 @@ class PhotoSearchViewModel(private val context: Context) {
             lastSubmittedQuery = null, searchError = null, lastQueryMs = null)
     }
 
+    fun setSearchScope(searchScope: SearchScope) {
+        if (_uiState.value.isSearching || _uiState.value.isSelectingPhotos) return
+        try { selectionStore.setSearchScope(searchScope) } catch (failure: Exception) {
+            reportError("Search scope could not be saved. The current scope is unchanged.")
+            return
+        }
+        _uiState.value = PhotoSearchPresentation.editQuery(_uiState.value, _uiState.value.searchQuery)
+            .copy(searchScope = searchScope, enabledThesisModes = emptySet(), modeReadiness = emptyMap())
+        refreshModeAvailability()
+    }
+
+    fun setResultLimit(limit: SearchResultLimit) {
+        if (_uiState.value.isSearching) return
+        _uiState.value = PhotoSearchPresentation.editQuery(_uiState.value, _uiState.value.searchQuery).copy(resultLimit = limit)
+    }
+
+    fun addPhotos(uris: List<android.net.Uri>) {
+        if (uris.isNotEmpty()) selectPhotos { selectionStore.addPhotos(uris) }
+    }
+
+    fun confirmSelection(keptPaths: Set<String>) = selectPhotos { selectionStore.confirmSelection(keptPaths) }
+
     fun chooseFolder(uri: android.net.Uri) = selectPhotos { selectionStore.chooseFolder(uri) }
     fun chooseRandomSample(count: Int) = selectPhotos { selectionStore.randomSample(count) }
 
     private fun selectPhotos(action: suspend () -> ThesisPhotoSelection) {
-        if (_uiState.value.isIndexing || _uiState.value.isVlmIndexing || _uiState.value.isSelectingPhotos || _uiState.value.isIndexingPreflight) return
+        if (_uiState.value.isIndexing || _uiState.value.isVlmIndexing || _uiState.value.isSelectingPhotos || _uiState.value.isIndexingPreflight || _uiState.value.isSearching) return
+        _uiState.value = _uiState.value.copy(isSelectingPhotos = true, error = null)
         scope.launch(Dispatchers.IO) {
-            _uiState.value = _uiState.value.copy(isSelectingPhotos = true, error = null)
             try {
                 val selected = action()
+                PhotoIndexingWorker.invalidateThesisScheduleIfSelectionChanged(context)
+                _uiState.value = PhotoSearchPresentation.editQuery(_uiState.value, _uiState.value.searchQuery)
+                    .copy(searchScope = SearchScope.CURRENT_SELECTION, selectionReviewed = selected.reviewed,
+                        selectionSessionId = selected.sessionId, sourceLabel = selected.source,
+                        selectionNotice = PhotoSelectionPresentation.notice(selected.unavailableCount, selected.photos.size, selected.requestedCount),
+                        photoFiles = selected.photos.map { PhotoFileUi(it.path, it.name, File(it.path).length() / 1024, false) },
+                        totalPhotos = selected.photos.size, searchableCount = 0, fullyIndexedCount = 0,
+                        partiallyIndexedCount = 0, indexedCount = 0, coverageSummary = "Checking selected index coverage…",
+                        enabledThesisModes = emptySet(), modeReadiness = emptyMap())
                 com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics.get(context).event("photo_selection",
-                    mapOf("selected_count" to selected.photos.size), selected.sessionId)
+                    mapOf("selected_count" to selected.photos.size, "unavailable_count" to selected.unavailableCount,
+                        "requested_count" to selected.requestedCount), selected.sessionId)
                 refreshPhotoList()
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                _uiState.value = _uiState.value.copy(error = failure.message ?: "Photo selection failed")
+                ThesisDiagnostics.get(context).event("photo_selection_failed", mapOf(
+                    "error_class" to failure.javaClass.simpleName,
+                    "reason_code" to if (failure is java.io.IOException) "COPY_IO_FAILED" else "SELECTION_FAILED"))
+                _uiState.value = _uiState.value.copy(error = when (failure) {
+                    is java.io.IOException -> "Could not copy the selected photos. Check free storage and photo access. Your previous selection is unchanged."
+                    is SecurityException -> "Photo access was denied. Review photo permission or choose photos again."
+                    else -> failure.message ?: "Photo selection failed"
+                })
             } finally {
                 _uiState.value = _uiState.value.copy(isSelectingPhotos = false)
             }
@@ -178,8 +287,11 @@ class PhotoSearchViewModel(private val context: Context) {
     }
 
     fun resetSelection() {
-        if (_uiState.value.isIndexing || _uiState.value.isVlmIndexing || _uiState.value.isIndexingPreflight) return
+        if (_uiState.value.isIndexing || _uiState.value.isVlmIndexing || _uiState.value.isIndexingPreflight || _uiState.value.isSearching || _uiState.value.isSelectingPhotos) return
         selectionStore.reset()
+        PhotoIndexingWorker.invalidateThesisScheduleIfSelectionChanged(context)
+        _uiState.value = PhotoSearchPresentation.editQuery(_uiState.value, _uiState.value.searchQuery)
+            .copy(enabledThesisModes = emptySet(), modeReadiness = emptyMap(), selectionReviewed = true)
         com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics.get(context).event("photo_selection_reset")
         refreshPhotoList()
     }
@@ -233,14 +345,20 @@ class PhotoSearchViewModel(private val context: Context) {
     fun refreshPhotoList() {
         scope.launch(Dispatchers.IO) {
             val selected = selectionStore.snapshot()
-            val indexedPaths = photoIndexer?.getVectorStore()?.getAllIndexedPaths().orEmpty()
+            val store = photoIndexer?.getVectorStore()
+            val indexedPaths = store?.getAllIndexedPaths().orEmpty()
+            safeDetailRecords = store?.getAllPhotosForSlm(eligiblePaths = selected?.photos.orEmpty().map { it.path }.toSet()).orEmpty().associateBy { it.filePath }
             val photos = selected?.photos.orEmpty()
             retainedVlmDiagnostics = VlmDiagnosticReadView(context)
                 .enrich(ThesisIndexingStateStore(context).snapshot()?.photos.orEmpty())
                 .mapNotNull { photo -> photo.vlmDiagnostic?.let { photo.path to it } }.toMap()
+            if (selected != selectionStore.snapshot()) return@launch
             _uiState.value = _uiState.value.copy(
-                sourceLabel = selected?.source ?: "No photos selected",
+                sourceLabel = selected?.source?.takeIf { photos.isNotEmpty() } ?: "No photos selected",
                 selectionSessionId = selected?.sessionId.orEmpty(),
+                selectionNotice = PhotoSelectionPresentation.notice(selected?.unavailableCount ?: 0, photos.size, selected?.requestedCount),
+                selectionReviewed = selected?.reviewed ?: true,
+                searchScope = selectionStore.searchScope(),
                 scanFolderPath = photos.firstOrNull()?.path?.let { File(it).parent }.orEmpty(),
                 photoFiles = photos.map {
                     PhotoFileUi(path = it.path, name = it.name, sizeKb = File(it.path).length() / 1024,
@@ -258,6 +376,9 @@ class PhotoSearchViewModel(private val context: Context) {
     fun refreshIndexingState() {
         val session = ThesisIndexingStateStore(context.applicationContext).snapshot()
         val selected = selectionStore.snapshot()?.photos.orEmpty()
+        val observedStatus = ThesisIndexingControlPresentation.observedStatus(session?.status.orEmpty(),
+            session?.isRunning == true, ThesisIndexingController.isPauseRequested,
+            ThesisIndexingController.isCancellationRequested)
         val states = session?.photos.orEmpty().associateBy { it.path }
         val selectedStates = selected.map { states[it.path] ?: PhotoChannelState(it.path, "unindexed") }
         val coverage = IndexCoverage.from(selectedStates)
@@ -268,7 +389,14 @@ class PhotoSearchViewModel(private val context: Context) {
             isVlmIndexing = false,
             canResumeIndexing = session?.canResume == true,
             indexingProgress = if (session != null && session.total > 0) session.processed.toFloat() / session.total else 0f,
-            indexingMessage = session?.let { "${it.status} · ${it.stage} · ${it.processed}/${it.total}" }.orEmpty(),
+            indexingMessage = session?.let {
+                when (it.errorCode.takeIf { _ -> it.status == "FAILED" }) {
+                    "reindex_workspace_unavailable" -> "Saved reindex progress is unavailable. Your previous index is kept. Hold Index to start a new confirmed request."
+                    "reindex_photo_revision_changed" -> "A selected photo or its index revision changed. The previous index is kept; refresh and use normal indexing for the changed file before reindexing."
+                    else -> ThesisIndexingControlPresentation.message(observedStatus, it.stage, it.processed, it.total)
+                }
+            }.orEmpty(),
+            indexingStatus = observedStatus,
             indexingElapsedMs = session?.let { (it.finishedAt ?: System.currentTimeMillis()) - (it.activeStartedAt ?: it.startedAt) },
             indexingStage = session?.stage.orEmpty(),
             indexingProcessed = session?.processed ?: 0,
@@ -296,9 +424,15 @@ class PhotoSearchViewModel(private val context: Context) {
                 )
                 photo.copy(channelStates = statuses,
                     channelDisplayStatuses = statuses.keys.associateWith { channels!!.presentation(it).status },
-                    channelDetails = statuses.keys.mapNotNull { key -> channels!!.presentation(key).detail?.let { key to it } }.toMap())
+                    channelDetails = statuses.keys.mapNotNull { key -> channels!!.presentation(key).detail?.let { key to it } }.toMap(),
+                    safeDetail = SafePhotoDetailPresentation.fromSafeReadView(safeDetailRecords[photo.path], channels))
             },
         )
+        val availableCoverage = Triple(coverage.ocr, coverage.clip, coverage.miniLmVector)
+        if (readinessCoverageSnapshot != availableCoverage) {
+            readinessCoverageSnapshot = availableCoverage
+            refreshModeAvailability()
+        }
         if (state.isIndexing && session?.isRunning != true) refreshPhotoList()
     }
 
@@ -309,7 +443,11 @@ class PhotoSearchViewModel(private val context: Context) {
 
     fun search() {
         val state = _uiState.value
-        if (state.searchQuery.isBlank() || isGenerating) return
+        if (state.searchQuery.isBlank() || isGenerating || state.isSelectingPhotos) return
+        if (state.isIndexingPreflight) {
+            _uiState.value = state.copy(searchError = "Wait for indexing preparation to finish before searching.")
+            return
+        }
         if (state.thesisMode !in state.enabledThesisModes) {
             _uiState.value = state.copy(searchError = state.modeReasons[state.thesisMode]
                 ?: "This mode needs compatible models and an existing index")
@@ -317,15 +455,28 @@ class PhotoSearchViewModel(private val context: Context) {
         }
         val query = state.searchQuery
         val mode = state.thesisMode
+        val eligiblePaths = PhotoSearchScope.eligiblePaths(state.searchScope, selectionStore.snapshot()?.photos.orEmpty().map { it.path })
         isGenerating = true
         _uiState.value = state.copy(isSearching = true, searchError = null,
             lastSubmittedQuery = query, searchResults = emptyList(), searchNote = "")
         scope.launch(Dispatchers.IO) {
             try {
                 val store = photoIndexer?.getVectorStore() ?: error("Index is unavailable")
-                val result = ThesisSearchEngine(context.applicationContext, store).search(query, mode)
+                val result = searchEngine().search(query, mode, eligiblePaths, state.resultLimit.maximum)
+                val materializationStart = System.nanoTime()
+                val records = store.getAllPhotosForSlm(eligiblePaths = result.results.map { it.filePath }.toSet()).associateBy { it.filePath }
+                val channels = ThesisIndexingStateStore(context).snapshot()?.photos.orEmpty().associateBy { it.path }
+                val displayResults = result.results.mapIndexed { index, hit ->
+                    hit.copy(rank = index + 1, queryMode = mode,
+                        safeDetail = SafePhotoDetailPresentation.fromSafeReadView(records[hit.filePath], channels[hit.filePath]))
+                }
+                check(eligiblePaths == null || displayResults.all { it.filePath in eligiblePaths }) { "Search scope contract failed" }
+                ThesisDiagnostics.get(context).event("query_ui_materialization", mapOf(
+                    "duration_ms" to (System.nanoTime() - materializationStart) / 1e6,
+                    "result_count" to displayResults.size, "scope" to state.searchScope.name,
+                    "result_limit" to state.resultLimit.name))
                 _uiState.value = _uiState.value.copy(
-                    isSearching = false, searchResults = result.results, searchNote = result.note,
+                    isSearching = false, searchResults = displayResults, searchNote = result.note,
                     lastQueryMs = result.timingsMs["total_ms"], slmDebugPlan = "",
                 )
             } catch (cancelled: CancellationException) {
@@ -649,6 +800,7 @@ class PhotoSearchViewModel(private val context: Context) {
         ownerJob?.cancel()
         CoroutineScope(Dispatchers.IO).launch {
             ownerJob?.join()
+            thesisSearchEngine?.close()
             photoIndexer?.close()
             slmEngine?.unload()
             slmEngine = null

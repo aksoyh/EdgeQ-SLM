@@ -66,11 +66,13 @@ class VlmImageAnalyzer(context: Context) : VlmSourceAnalyzer {
             if (!engine.isVisionLoaded()) {
                 observation = observation.copy(failureStage = VlmFailureStage.MODEL_LOAD)
                 val artifacts = VlmInferenceContract.resolveArtifacts(context)
+                diagnostics.modelState("vlm_lfm25_q5", "loading")
                 diagnostics.measured("vlm_model_load") {
                     check(engine.loadModel(artifacts.model.absolutePath)) { "vlm_model_load_failed" }
                 }
                 diagnostics.modelState("vlm_lfm25_q5", "loaded")
                 observation = observation.copy(failureStage = VlmFailureStage.PROJECTOR_LOAD)
+                diagnostics.modelState("vlm_lfm25_projector_q8", "loading")
                 diagnostics.measured("vlm_projector_load") {
                     check(engine.loadVisionProjector(artifacts.projector.absolutePath)) { "vlm_projector_load_failed" }
                 }
@@ -87,7 +89,7 @@ class VlmImageAnalyzer(context: Context) : VlmSourceAnalyzer {
                 imageData = rgb, width = plan.width, height = plan.height,
                 prompt = prompt, maxTokens = VlmInferenceContract.MAX_TOKENS
             ) }
-            lastDiagnostic = observation.copy(inferenceCompleted = true, generationNonempty = generation.text.isNotBlank())
+            lastDiagnostic = observation.withGeneration(generation)
             return VlmSourceAnalysis(generation, working?.transform)
         } catch (failure: Throwable) {
             lastDiagnostic = observation.failed(failure)

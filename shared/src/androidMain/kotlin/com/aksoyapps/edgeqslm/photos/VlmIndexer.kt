@@ -85,6 +85,18 @@ class VlmIndexer(
             indexRow(photo.id)
         }
 
+    suspend fun indexCheckpoint(photoPath: String, resumeInterrupted: Boolean): VlmIndexResult {
+        val photo = vectorStore.getPhotoForVlmPath(photoPath) ?: return failure("photo_not_indexed", 0)
+        val source = parseSource(photo.semanticSource)
+        if (VlmSourceWorkPolicy.mayGenerate(photo.semanticSource != null, source?.state, resumeInterrupted)) {
+            return vlmAnalyzer.withSession { indexRow(photo.id) }
+        }
+        if (source?.state == SemanticSourceState.VALID) return indexRow(photo.id, allowInference = false)
+        VlmFailureTaxonomy.retained(source, false)?.let { onDiagnostic(photoPath, it) }
+        return failure(if (VlmSourceWorkPolicy.isInterrupted(source?.state)) "explicit_resume_required"
+            else "existing_source_outcome_retained", System.currentTimeMillis())
+    }
+
     private suspend fun indexRow(rowId: Long, allowInference: Boolean = true): VlmIndexResult {
         val start = System.currentTimeMillis()
         val photo = vectorStore.getPhotoForVlm(rowId) ?: return failure("photo_not_indexed", start)
@@ -160,14 +172,15 @@ class VlmIndexer(
             }
             raw = analysis.generation.text
             imageTransform = analysis.imageTransform
-            observation = (vlmAnalyzer.lastDiagnostic ?: observation).copy(
+            observation = (vlmAnalyzer.lastDiagnostic ?: observation.withGeneration(analysis.generation)).copy(
                 failureStage = VlmFailureStage.INFERENCE, inferenceCompleted = true,
                 generationNonempty = raw.isNotBlank())
             coroutineContext.ensureActive()
             observation = observation.copy(failureStage = VlmFailureStage.PARSING)
             val structured = StructuredVisualSource.parseCurrent(raw)
             observation = observation.copy(failureStage = VlmFailureStage.SOURCE_ELIGIBILITY,
-                parseStatus = VlmEvidenceStatus.PASS, schemaStatus = VlmEvidenceStatus.PASS)
+                parseStatus = VlmEvidenceStatus.PASS, schemaStatus = VlmEvidenceStatus.PASS,
+                outputStructure = observation.outputStructure?.accepted())
             VlmSourceQuality.requireSearchableCandidate(structured)
             observation = observation.copy(failureStage = VlmFailureStage.IMAGE_OPEN,
                 eligibilityStatus = VlmEvidenceStatus.PASS)

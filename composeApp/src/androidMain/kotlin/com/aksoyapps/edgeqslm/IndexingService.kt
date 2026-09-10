@@ -44,11 +44,13 @@ class IndexingService : Service() {
         const val ACTION_START_ML_INDEXING = "com.aksoyapps.edgeqslm.START_ML_INDEXING"
         const val ACTION_START_VLM_INDEXING = "com.aksoyapps.edgeqslm.START_VLM_INDEXING"
         const val ACTION_START_THESIS_INDEXING = "com.aksoyapps.edgeqslm.START_THESIS_INDEXING"
+        const val ACTION_PAUSE_THESIS_INDEXING = "com.aksoyapps.edgeqslm.PAUSE_THESIS_INDEXING"
         const val ACTION_RESUME_THESIS_INDEXING = "com.aksoyapps.edgeqslm.RESUME_THESIS_INDEXING"
         const val ACTION_COMPLETE_MISSING_THESIS_CHANNELS = "com.aksoyapps.edgeqslm.COMPLETE_MISSING_THESIS_CHANNELS"
         const val EXTRA_SELECTED_PATHS = "selected_paths"
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_INCLUDE_SEMANTIC = "include_semantic"
+        const val EXTRA_REINDEX_REQUEST_ID = "reindex_request_id"
         const val ACTION_STOP_INDEXING = "com.aksoyapps.edgeqslm.STOP_INDEXING"
         
         // Extras
@@ -89,29 +91,45 @@ class IndexingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "onStartCommand: action=${intent?.action}")
         
+        if (indexingJob?.isActive == true && intent?.action in setOf(
+            ACTION_START_THESIS_INDEXING, ACTION_RESUME_THESIS_INDEXING, ACTION_COMPLETE_MISSING_THESIS_CHANNELS,
+            ACTION_START_ML_INDEXING, ACTION_START_VLM_INDEXING)) return START_STICKY
         when (intent?.action) {
             ACTION_START_THESIS_INDEXING -> {
                 val paths = intent.getStringArrayListExtra(EXTRA_SELECTED_PATHS)?.distinct().orEmpty()
+                val reindexRequestId = intent.getStringExtra(EXTRA_REINDEX_REQUEST_ID)
+                val selection = if (reindexRequestId != null) PhotoSelectionStore(this).snapshot() else null
                 if (paths.isEmpty()) {
                     onIndexingError("Choose photos before indexing")
+                } else if (reindexRequestId != null && (runCatching { UUID.fromString(reindexRequestId) }.isFailure ||
+                        selection?.reviewed != true || selection.sessionId != intent.getStringExtra(EXTRA_SESSION_ID) ||
+                        selection.photos.map { it.path } != paths)) {
+                    onIndexingError("The reindex request no longer matches the confirmed photo selection")
                 } else {
-                    startThesisIndexing(ThesisIndexingSession(
-                        sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: UUID.randomUUID().toString(),
+                    val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: UUID.randomUUID().toString()
+                    val continuation = ThesisIndexingStateStore(this).snapshot()
+                        .continueSelectedReindex(sessionId, paths, reindexRequestId)
+                    startThesisIndexing(continuation ?: ThesisIndexingSession(
+                        sessionId = sessionId,
                         selectedPaths = paths,
                         includeSemantic = intent.getBooleanExtra(EXTRA_INCLUDE_SEMANTIC, true),
+                        reindexRequestId = reindexRequestId,
                     ))
                 }
             }
             ACTION_RESUME_THESIS_INDEXING -> {
-                ThesisIndexingStateStore(this).snapshot()?.takeIf { it.canResume }?.let { startThesisIndexing(it) }
+                val saved = ThesisIndexingStateStore(this).snapshot()?.takeIf { it.canResume }
+                if (saved != null) startThesisIndexing(saved.copy(resumeInterruptedSources = true))
+                else onIndexingError("No paused or interrupted indexing session is ready to resume")
             }
+            ACTION_PAUSE_THESIS_INDEXING -> pauseIndexing()
             ACTION_COMPLETE_MISSING_THESIS_CHANNELS -> {
                 val paths = intent.getStringArrayListExtra(EXTRA_SELECTED_PATHS).orEmpty()
                 val session = ThesisIndexingStateStore(this).snapshot()
                 if (session?.canRequestCompletion == true && session.sessionId == intent.getStringExtra(EXTRA_SESSION_ID) &&
                     session.selectedPaths == paths) {
-                    startThesisIndexing(session.copy(completeMissingChannels = true))
-                } else onIndexingError("The completed session no longer matches the selected photos")
+                    startThesisIndexing(session.copy(completeMissingChannels = true, resumeInterruptedSources = true))
+                } else onIndexingError("The saved indexing session no longer matches the selected photos")
             }
             ACTION_START_ML_INDEXING -> {
                 val folderPath = intent.getStringExtra(EXTRA_FOLDER_PATH)
@@ -130,7 +148,7 @@ class IndexingService : Service() {
                 when (jobPreferences.getString("action", null)) {
                     ACTION_START_THESIS_INDEXING -> {
                         ThesisIndexingStateStore(this).snapshot()?.takeIf { it.canResume || it.status == "PENDING" }
-                            ?.let { startThesisIndexing(it) }
+                            ?.let { startThesisIndexing(it.copy(resumeInterruptedSources = false)) }
                     }
                     ACTION_START_VLM_INDEXING -> startVlmIndexing(folderPath, false, recovery = true)
                     ACTION_START_ML_INDEXING -> startMlIndexing(folderPath)
@@ -350,8 +368,12 @@ class IndexingService : Service() {
      */
     private fun startThesisIndexing(session: ThesisIndexingSession) {
         if (indexingJob?.isActive == true) return
+        if (ThesisIndexingStateStore(this).snapshot()?.isRunning == true) {
+            ThesisDiagnostics.get(this).event("index_start_rejected", mapOf("reason" to "existing_run_active"), session.sessionId)
+            stopSelf()
+            return
+        }
         rememberJob(ACTION_START_THESIS_INDEXING, null)
-        ThesisIndexingStateStore(this).save(session.copy(status = "PENDING"))
         acquireWakeLock()
         startForeground(NOTIFICATION_ID, createNotification("Preparing selected photos", 0))
         indexingJob = serviceScope.launch {
@@ -361,14 +383,24 @@ class IndexingService : Service() {
                     _indexingState.value = IndexingState(
                         isRunning = progress.isRunning, type = IndexingType.ML, current = progress.processed,
                         total = progress.total, progress = percent / 100f,
-                        message = if (progress.status == "COMPLETED")
-                            "Finished: ${progress.coverage.searchable}/${progress.total} searchable, ${progress.coverage.partiallyIndexed} partial" else
-                            "${progress.stage}: ${progress.processed}/${progress.total}",
+                        message = ThesisIndexingControlPresentation.message(progress.status, progress.stage, progress.processed, progress.total),
                         error = progress.errorCode,
                     )
-                    updateNotification("${progress.stage}: ${progress.processed}/${progress.total}", percent)
+                    updateNotification(_indexingState.value.message, percent)
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                ThesisDiagnostics.get(this@IndexingService).event("index_service_failure",
+                    mapOf("reason" to failure.javaClass.simpleName), session.sessionId)
             } finally {
+                ThesisIndexingStateStore(this@IndexingService).snapshot()?.let { finalState ->
+                    _indexingState.value = _indexingState.value.copy(
+                        isRunning = finalState.isRunning,
+                        message = ThesisIndexingControlPresentation.message(finalState.status, finalState.stage,
+                            finalState.processed, finalState.total), error = finalState.errorCode,
+                    )
+                }
                 jobPreferences.edit().clear().commit()
                 releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -377,11 +409,35 @@ class IndexingService : Service() {
         }
     }
 
+    fun pauseIndexing() {
+        val stateStore = ThesisIndexingStateStore(this)
+        val current = stateStore.snapshot()
+        if (current?.status in setOf("PAUSING", "CANCELLING") || ThesisIndexingController.isPauseRequested ||
+            ThesisIndexingController.isCancellationRequested) return
+        if (!ThesisIndexingController.requestPause()) return
+        jobPreferences.edit().clear().commit()
+        stateStore.snapshot()?.takeIf { it.isRunning }?.let { session ->
+            val message = ThesisIndexingControlPresentation.message("PAUSING", session.stage, session.processed, session.total)
+            _indexingState.value = _indexingState.value.copy(isRunning = true, message = message)
+            updateNotification(message, if (session.total > 0) session.processed * 100 / session.total else 0)
+            ThesisDiagnostics.get(this).event("background_pause_requested", emptyMap(), session.sessionId)
+        }
+    }
+
     fun stopIndexing() {
         jobPreferences.edit().clear().commit()
+        val stateStore = ThesisIndexingStateStore(this)
+        val current = stateStore.snapshot()
+        if (current?.status == "CANCELLING" || ThesisIndexingController.isCancellationRequested) return
         val running = indexingJob
-        if (running == null && ThesisIndexingController.cancelActive()) {
-            ThesisDiagnostics.get(this).event("background_cancel_requested")
+        if (current?.isRunning == true || running?.isActive == true) {
+            ThesisDiagnostics.get(this).event("background_cancel_requested",
+                mapOf("stage" to (current?.stage ?: "UNKNOWN")), current?.sessionId)
+        }
+        val controllerCancelled = ThesisIndexingController.cancelActive()
+        if (running == null && controllerCancelled) {
+            _indexingState.value = _indexingState.value.copy(isRunning = true,
+                message = ThesisIndexingControlPresentation.message("CANCELLING", "", 0, 0))
             return
         }
         if (running == null || running.isCompleted) {
@@ -390,17 +446,16 @@ class IndexingService : Service() {
             stopSelf()
             return
         }
-        _indexingState.value = _indexingState.value.copy(
-            isRunning = true, message = "Stopping after the current operation..."
-        )
-        ThesisIndexingStateStore(this).snapshot()?.takeIf { it.isRunning }?.let { session ->
-            ThesisIndexingStateStore(this).save(session.copy(status = "CANCELLING"))
-        }
+        _indexingState.value = _indexingState.value.copy(isRunning = true,
+            message = ThesisIndexingControlPresentation.message("CANCELLING", "", 0, 0))
         running.cancel()
         serviceScope.launch {
             running.join()
             releaseWakeLock()
-            _indexingState.value = _indexingState.value.copy(isRunning = false, message = "Indexing cancelled")
+            val finalState = stateStore.snapshot()
+            _indexingState.value = _indexingState.value.copy(isRunning = false,
+                message = finalState?.let { ThesisIndexingControlPresentation.message(it.status, it.stage, it.processed, it.total) }
+                    ?: "Indexing stopped")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -469,15 +524,26 @@ class IndexingService : Service() {
             this, 0, openIntent, PendingIntent.FLAG_IMMUTABLE
         )
         
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("EdgeQ Photo Indexing")
             .setContentText(message)
             .setSmallIcon(android.R.drawable.ic_menu_gallery)
             .setOngoing(true)
             .setProgress(100, progress, progress == 0)
             .setContentIntent(openPendingIntent)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPendingIntent)
-            .build()
+        val state = ThesisIndexingStateStore(this).snapshot()
+        val controlStatus = ThesisIndexingControlPresentation.observedStatus(state?.status.orEmpty(),
+            state?.isRunning == true, ThesisIndexingController.isPauseRequested,
+            ThesisIndexingController.isCancellationRequested)
+        if (jobPreferences.getString("action", null) == ACTION_START_THESIS_INDEXING &&
+            controlStatus !in setOf("PAUSING", "CANCELLING")) {
+            val pause = Intent(this, IndexingService::class.java).setAction(ACTION_PAUSE_THESIS_INDEXING)
+            val pendingPause = PendingIntent.getService(this, 1, pause, PendingIntent.FLAG_IMMUTABLE)
+            builder.addAction(android.R.drawable.ic_media_pause, "Pause", pendingPause)
+        }
+        if (controlStatus != "CANCELLING")
+            builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop now", stopPendingIntent)
+        return builder.build()
     }
     
     private fun updateNotification(message: String, progress: Int) {

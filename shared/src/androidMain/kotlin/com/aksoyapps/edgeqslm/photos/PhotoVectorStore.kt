@@ -353,7 +353,7 @@ class PhotoVectorStore(context: Context, databaseName: String = DATABASE_NAME) :
     /**
      * Simple text search using LIKE (works on all devices)
      */
-    fun searchByText(query: String, limit: Int = 20): List<PhotoSearchResult> {
+    fun searchByText(query: String, limit: Int = 20, eligiblePaths: Set<String>? = null): List<PhotoSearchResult> {
         val db = readableDatabase
         val searchTerms = query.split(" ").filter { it.isNotBlank() }
         
@@ -372,11 +372,13 @@ class PhotoVectorStore(context: Context, databaseName: String = DATABASE_NAME) :
             FROM photos 
             WHERE $conditions
             LIMIT ?
-        """, args + limit.toString())
+        """, args + (if (eligiblePaths == null) limit else Int.MAX_VALUE).toString())
         
         val results = mutableListOf<PhotoSearchResult>()
         cursor.use {
             while (it.moveToNext()) {
+                if (eligiblePaths != null && it.getString(1) !in eligiblePaths) continue
+                if (results.size == limit) break
                 // Calculate simple relevance score based on match count
                 val ocrText = it.getString(3) ?: ""
                 val fileName = it.getString(2)
@@ -421,7 +423,7 @@ class PhotoVectorStore(context: Context, databaseName: String = DATABASE_NAME) :
     /**
      * Vector similarity search using image embeddings
      */
-    fun searchByImageEmbedding(queryEmbedding: FloatArray, queryText: String = "", limit: Int = 20): List<PhotoSearchResult> {
+    fun searchByImageEmbedding(queryEmbedding: FloatArray, queryText: String = "", limit: Int = 20, eligiblePaths: Set<String>? = null): List<PhotoSearchResult> {
         val db = readableDatabase
         val cursor = db.rawQuery(
             "SELECT id, file_path, file_name, ocr_text, image_embedding FROM photos WHERE image_embedding IS NOT NULL",
@@ -431,6 +433,7 @@ class PhotoVectorStore(context: Context, databaseName: String = DATABASE_NAME) :
         val results = mutableListOf<Pair<PhotoSearchResult, Float>>()
         cursor.use {
             while (it.moveToNext()) {
+                if (eligiblePaths != null && it.getString(1) !in eligiblePaths) continue
                 val embeddingBlob = it.getBlob(4)
                 val embedding = embeddingBlob.toFloatArray()
                 val similarity = cosineSimilarity(queryEmbedding, embedding)
@@ -464,14 +467,15 @@ class PhotoVectorStore(context: Context, databaseName: String = DATABASE_NAME) :
         queryEmbedding: FloatArray?,
         textWeight: Float = 0.3f,
         imageWeight: Float = 0.7f,
-        limit: Int = 20
+        limit: Int = 20,
+        eligiblePaths: Set<String>? = null
     ): List<PhotoSearchResult> {
         val textResults = if (textQuery.isNotBlank()) {
-            searchByText(textQuery, limit * 2).associateBy { it.filePath }
+            searchByText(textQuery, limit * 2, eligiblePaths).associateBy { it.filePath }
         } else emptyMap()
         
         val imageResults = if (queryEmbedding != null) {
-            searchByImageEmbedding(queryEmbedding, textQuery, limit * 2).associateBy { it.filePath }
+            searchByImageEmbedding(queryEmbedding, textQuery, limit * 2, eligiblePaths).associateBy { it.filePath }
         } else emptyMap()
         
         // If no image embeddings, just return text results
@@ -601,16 +605,18 @@ class PhotoVectorStore(context: Context, databaseName: String = DATABASE_NAME) :
     /**
      * Load all indexed photos for SLM in-memory scoring
      */
-    fun getAllPhotosForSlm(limit: Int = 5000): List<PhotoRecord> {
+    fun getAllPhotosForSlm(limit: Int = 5000, eligiblePaths: Set<String>? = null): List<PhotoRecord> {
         val db = readableDatabase
         val cursor = db.rawQuery("""
             SELECT id, file_path, file_name, ocr_text, semantic_source, file_modified
             FROM photos
             LIMIT ?
-        """, arrayOf(limit.toString()))
+        """, arrayOf((if (eligiblePaths == null) limit else Int.MAX_VALUE).toString()))
         val records = mutableListOf<PhotoRecord>()
         cursor.use {
             while (it.moveToNext()) {
+                if (eligiblePaths != null && it.getString(1) !in eligiblePaths) continue
+                if (records.size == limit) break
                 val source = it.getString(4)?.let { value ->
                     runCatching { StructuredSemanticSource.parsePersisted(value) }.getOrNull()
                 }

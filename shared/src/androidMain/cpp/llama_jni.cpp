@@ -23,6 +23,7 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 #include "sampling.h"
+#include "vision_cancellation.h"
 
 #define LOG_TAG "LlamaJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -40,6 +41,30 @@ static bool g_is_vision_model = false;
 static long g_prefill_time_ms = 0;
 static long g_decode_time_ms = 0;
 static int g_tokens_generated = 0;
+static VisionCancellationRegistry g_vision_cancellations;
+
+class VisionAbortScope {
+public:
+  explicit VisionAbortScope(VisionCancellationRegistry::Request request)
+      : request_(std::move(request)) {
+    llama_set_abort_callback(g_context, [](void *data) {
+      return static_cast<std::atomic<bool> *>(data)->load();
+    }, request_.get());
+  }
+
+  ~VisionAbortScope() { llama_set_abort_callback(g_context, nullptr, nullptr); }
+
+  bool cancelled() const { return request_->load(); }
+
+private:
+  VisionCancellationRegistry::Request request_;
+};
+
+static jstring vision_cancelled(JNIEnv *env) {
+  const jclass exception = env->FindClass("java/util/concurrent/CancellationException");
+  if (exception) env->ThrowNew(exception, "VLM operation cancelled");
+  return nullptr;
+}
 
 static void release_model() {
   if (g_mtmd_ctx) {
@@ -394,7 +419,7 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_isVisionModelLoadedNative(
 JNIEXPORT jstring JNICALL
 Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_analyzeImageNative(
     JNIEnv *env, jobject thiz, jbyteArray imageData, jint width, jint height,
-    jstring prompt, jint maxTokens) {
+    jstring prompt, jint maxTokens, jlong cancellationRequest) {
 
   if (!g_model || !g_context || !g_vocab || !g_mtmd_ctx || !g_is_vision_model) {
     LOGE("analyzeImageNative: Vision model not loaded");
@@ -408,6 +433,11 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_analyzeImageNative(
   }
 
   try {
+    const auto request = g_vision_cancellations.find(cancellationRequest);
+    if (!request) return env->NewStringUTF("[Error: Missing vision cancellation request]");
+    VisionAbortScope abort(request);
+    if (abort.cancelled()) return vision_cancelled(env);
+
     auto release_bytes = [env, imageData](jbyte *bytes) {
       env->ReleaseByteArrayElements(imageData, bytes, JNI_ABORT);
     };
@@ -479,6 +509,7 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_analyzeImageNative(
     const mtmd_bitmap *bitmaps[] = {bitmap.get()};
     const int32_t tokenize_result =
         mtmd_tokenize(g_mtmd_ctx, chunks.get(), &input_text, bitmaps, 1);
+    if (abort.cancelled()) return vision_cancelled(env);
     if (tokenize_result != 0) {
       LOGE("analyzeImageNative: Tokenization failed (err=%d)", tokenize_result);
       return env->NewStringUTF("[Error: Image tokenization failed]");
@@ -522,10 +553,12 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_analyzeImageNative(
          n_chunks, image_chunks, leading_bos_tokens, prefill_text_tokens.size());
 
     llama_pos n_past = 0;
+    if (abort.cancelled()) return vision_cancelled(env);
     LOGI("analyzeImageNative: Calling mtmd_helper_eval_chunks for V4 multimodal prefill");
     const int32_t eval_result = mtmd_helper_eval_chunks(
         g_mtmd_ctx, g_context, chunks.get(), n_past, 0,
         static_cast<int32_t>(llama_n_batch(g_context)), true, &n_past);
+    if (abort.cancelled()) return vision_cancelled(env);
     if (eval_result != 0) {
       LOGE("analyzeImageNative: Multimodal prefill failed (err=%d)", eval_result);
       return env->NewStringUTF("[Error: Multimodal prefill failed]");
@@ -563,6 +596,7 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_analyzeImageNative(
     output.reserve(maxTokens * 8);
     const llama_token eos_token = llama_vocab_eos(g_vocab);
     for (int i = 0; i < maxTokens; i++) {
+      if (abort.cancelled()) return vision_cancelled(env);
       const llama_token new_token =
           common_sampler_sample(sampler.get(), g_context, -1);
       common_sampler_accept(sampler.get(), new_token, true);
@@ -587,12 +621,15 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_analyzeImageNative(
 
       llama_token decode_token = new_token;
       llama_batch next_batch = llama_batch_get_one(&decode_token, 1);
-      if (llama_decode(g_context, next_batch) != 0) {
+      const int decode_result = llama_decode(g_context, next_batch);
+      if (abort.cancelled()) return vision_cancelled(env);
+      if (decode_result != 0) {
         LOGE("analyzeImageNative: Decode failed at %d", i);
         return env->NewStringUTF("[Error: Vision generation decode failed]");
       }
       g_tokens_generated++;
     }
+    if (abort.cancelled()) return vision_cancelled(env);
 
     g_decode_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::high_resolution_clock::now() - decode_start)
@@ -608,6 +645,30 @@ Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_analyzeImageNative(
     LOGE("analyzeImageNative: V4 inference failed: %s", error.what());
     return env->NewStringUTF("[Error: V4 inference failed]");
   }
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_createVisionCancellationNative(
+    JNIEnv *env, jobject thiz) {
+  try {
+    return g_vision_cancellations.create();
+  } catch (const std::bad_alloc &) {
+    const jclass exception = env->FindClass("java/lang/OutOfMemoryError");
+    if (exception) env->ThrowNew(exception, "Cannot create VLM cancellation request");
+    return 0;
+  }
+}
+
+JNIEXPORT void JNICALL
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_cancelVisionRequestNative(
+    JNIEnv *env, jobject thiz, jlong request) {
+  g_vision_cancellations.cancel(request);
+}
+
+JNIEXPORT void JNICALL
+Java_com_aksoyapps_edgeqslm_AndroidLlamaCppEngine_releaseVisionCancellationNative(
+    JNIEnv *env, jobject thiz, jlong request) {
+  g_vision_cancellations.release(request);
 }
 
 } // extern "C"

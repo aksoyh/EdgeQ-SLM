@@ -2,6 +2,8 @@ package com.aksoyapps.edgeqslm.photos
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -34,6 +36,8 @@ import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import java.io.File
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import com.aksoyapps.edgeqslm.R
 
@@ -59,9 +63,19 @@ fun PhotoSearchScreen(
     onSourceExpandedChange: (Boolean) -> Unit,
     onOpenModels: () -> Unit,
     onCompleteMissingChannels: () -> Unit,
+    onSearchScopeChange: (SearchScope) -> Unit = {},
+    onResultLimitChange: (SearchResultLimit) -> Unit = {},
+    onAddPhotos: () -> Unit = {},
+    onConfirmSelection: (Set<String>) -> Unit = {},
+    onPauseIndexing: () -> Unit = {},
+    onReindexSelection: (SelectionReindexConfirmation) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedPhoto by remember { mutableStateOf<PhotoSearchResultUi?>(null) }
+    var showSelectionReview by remember { mutableStateOf(false) }
+    LaunchedEffect(uiState.selectionSessionId, uiState.selectionReviewed) {
+        if (!uiState.selectionReviewed && uiState.photoFiles.isNotEmpty()) showSelectionReview = true
+    }
     val scrollState = rememberScrollState()
     LaunchedEffect(uiState.selectedTab) { scrollState.scrollTo(0) }
     
@@ -98,7 +112,8 @@ fun PhotoSearchScreen(
         if (uiState.selectedTab == 0) {
             StatusCard(uiState, onStartIndexing, onResumeIndexing, onStopIndexing, onRefresh,
                 onSelectFolder, onThesisModeChange, onRandomSample, onResetSelection,
-                sourceExpanded, onSourceExpandedChange, onOpenModels, onCompleteMissingChannels)
+                sourceExpanded, onSourceExpandedChange, onOpenModels, onCompleteMissingChannels,
+                onAddPhotos, { showSelectionReview = true }, onPauseIndexing, onReindexSelection)
         }
 
         uiState.error?.let { error ->
@@ -121,14 +136,18 @@ fun PhotoSearchScreen(
                     score = 0f,
                     thumbnailUri = "file://${file.path}",
                     matchType = MatchType.OCR,
-                    matchReason = ""
+                    matchReason = "", safeDetail = file.safeDetail
                 )
             }
-            1 -> SearchTabScrollable(uiState, onQueryChange, onSearch, onThesisModeChange) { selectedPhoto = it }
+            1 -> SearchTabScrollable(uiState, onQueryChange, onSearch, onThesisModeChange, onSearchScopeChange, onResultLimitChange) { selectedPhoto = it }
         }
         
     }
     
+    if (showSelectionReview) SelectionReviewDialog(uiState, onAddPhotos,
+        onConfirm = { paths -> onConfirmSelection(paths); showSelectionReview = false },
+        onDismiss = { showSelectionReview = false })
+
     selectedPhoto?.let { photo ->
         PhotoDetailDialog(photo) { selectedPhoto = null }
     }
@@ -137,148 +156,109 @@ fun PhotoSearchScreen(
 @Composable
 private fun PhotoDetailDialog(photo: PhotoSearchResultUi, onDismiss: () -> Unit) {
     var showFullscreen by remember { mutableStateOf(false) }
-    
-    // Fullscreen image viewer
-    if (showFullscreen) {
-        FullscreenImageViewer(
-            filePath = photo.filePath,
-            fileName = photo.fileName,
-            onDismiss = { showFullscreen = false }
-        )
-    }
-    
+    var technical by remember { mutableStateOf(false) }
+    val detail = photo.safeDetail
+    if (showFullscreen) FullscreenImageViewer(photo.filePath, photo.fileName) { showFullscreen = false }
     Dialog(onDismissRequest = onDismiss) {
-        Card(
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = photo.fileName,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = onDismiss) {
-                        Text("✕", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+        Card(Modifier.fillMaxWidth().fillMaxHeight(0.9f), shape = RoundedCornerShape(16.dp)) {
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(photo.fileName, fontWeight = FontWeight.Bold, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onDismiss) { Text("Close") }
                 }
-                
-                Spacer(modifier = Modifier.height(8.dp))
-                
-                // Clickable image - tap for fullscreen
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(250.dp)
-                        .clickable { showFullscreen = true },
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        AsyncImage(
-                            model = File(photo.filePath),
-                            contentDescription = photo.fileName,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Fit
-                        )
-                        // Tap hint
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(8.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text("👆 Tap for fullscreen", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface)
-                        }
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(12.dp))
-                
-                // Score
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.CenterHorizontally)
-                        .background(Color(0xFF238636), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
-                ) {
-                    Text("Ranking score: ${"%.4f".format(photo.score)}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
-                }
-                
-                Spacer(modifier = Modifier.height(12.dp))
-                
-                Text("ℹ️ Photo Info", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF58A6FF))
-                
-                Spacer(modifier = Modifier.height(6.dp))
-                
-                Card(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(12.dp)
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        // VLM Description
-                        Text("🧠 VLM Description", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF8B5CF6))
-                        Spacer(modifier = Modifier.height(4.dp))
-                        val vlmDesc = photo.vlmDescription
-                        if (vlmDesc.isNullOrBlank()) {
-                            Text("Not indexed with VLM", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else {
-                            Text(vlmDesc, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, lineHeight = 18.sp)
-                        }
-                        
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-                        // VLM Tags
-                        Text("🏷️ VLM Tags", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF8B5CF6))
-                        Spacer(modifier = Modifier.height(4.dp))
-                        val vlmTags = photo.vlmTags
-                        if (vlmTags.isNullOrBlank()) {
-                            Text("No tags", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else {
-                            Text(vlmTags, fontSize = 13.sp, color = Color(0xFFE879F9), lineHeight = 18.sp)
-                        }
-                        
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-                        // OCR Text
-                        Text("📝 OCR Text", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF58A6FF))
-                        Spacer(modifier = Modifier.height(4.dp))
-                        val ocrText = photo.ocrText
-                        if (ocrText.isNullOrBlank()) {
-                            Text("No text detected", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else {
-                            Text(ocrText, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, lineHeight = 18.sp)
-                        }
-                        
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-                        // Match Reason
-                        if (photo.matchReason.isNotBlank()) {
-                            Text("🎯 Match Reason", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF238636))
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(photo.matchReason, fontSize = 13.sp, color = Color(0xFF7EE787), lineHeight = 18.sp)
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    AsyncImage(model = File(photo.filePath), contentDescription = photo.fileName,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().height(220.dp).clickable { showFullscreen = true })
+                    photo.rank?.let { rank -> Text("Rank #$rank · ${photo.queryMode?.displayLabel() ?: photo.matchType.name}",
+                        style = MaterialTheme.typography.labelLarge) }
+                    Text("Safe semantic concepts", fontWeight = FontWeight.Bold)
+                    Text(detail?.semanticConcepts ?: detail?.semanticExplanation ?: "Safe detail is unavailable",
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text("Current eligible C_search_projection_v2; not raw VLM narrative.",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("OCR", fontWeight = FontWeight.Bold)
+                    Text(detail?.ocrStatus ?: "Processing state unavailable")
+                    Text(detail?.ocrText ?: detail?.ocrExplanation ?: "No retained OCR completion evidence",
+                        style = MaterialTheme.typography.bodyMedium)
+                    if (photo.rank != null) {
+                        Text("Why this matched", fontWeight = FontWeight.Bold)
+                        Text(PhotoResultPresentation.whyMatched(photo))
+                        ThesisDisclosureButton("Technical details", technical, { technical = !technical })
+                        if (technical) {
+                            if (photo.rawRrfScore != null) {
+                                Text("Hybrid RRF score: ${"%.6f".format(java.util.Locale.US, photo.rawRrfScore)}")
+                                photo.legacyRank?.let { Text("Legacy channel rank: $it") }
+                                photo.semanticRank?.let { Text("Semantic channel rank: $it") }
+                                PhotoResultPresentation.relativeRrfStrength(photo)?.let {
+                                    Text("Relative to theoretical maximum: ${"%.1f".format(java.util.Locale.US, it * 100)}%")
+                                }
+                                Text(PhotoResultPresentation.RRF_EXPLANATION)
+                            } else {
+                                Text("Channel ranking score: ${"%.6f".format(java.util.Locale.US, photo.score)}")
+                                Text("This ranking score is not a probability or confidence estimate.")
+                            }
+                            if (photo.matchReason.isNotBlank()) Text(photo.matchReason, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun SelectionReviewDialog(
+    uiState: PhotoSearchUiState,
+    onAddPhotos: () -> Unit,
+    onConfirm: (Set<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var removed by remember { mutableStateOf(emptySet<String>()) }
+    var confirmClear by remember { mutableStateOf(false) }
+    val kept = uiState.photoFiles.filterNot { it.path in removed }
+    val busy = uiState.isSelectingPhotos || uiState.isIndexing || uiState.isSearching
+    Dialog(onDismissRequest = onDismiss) {
+        Card(Modifier.fillMaxWidth().fillMaxHeight(0.9f)) {
+            Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Review selected photos (${kept.size})", style = MaterialTheme.typography.titleMedium)
+                if (uiState.selectionNotice.isNotBlank()) Text(uiState.selectionNotice, style = MaterialTheme.typography.bodySmall)
+                Text("Removing a photo changes only this selection. Existing indexed records and photo files are kept.",
+                    style = MaterialTheme.typography.bodySmall)
+                Text("English-text photos are recommended for the manual demonstration. Photos without text are valid.",
+                    style = MaterialTheme.typography.labelSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onAddPhotos, enabled = !busy) { Text("Add photos") }
+                    TextButton(onClick = { confirmClear = true }, enabled = !busy && kept.isNotEmpty()) { Text("Clear selection") }
+                }
+                if (uiState.isSelectingPhotos) LinearProgressIndicator(Modifier.fillMaxWidth())
+                LazyVerticalGrid(columns = GridCells.Adaptive(120.dp), modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(kept, key = { it.path }) { photo ->
+                        Card {
+                            AsyncImage(model = File(photo.path), contentDescription = photo.name,
+                                contentScale = ContentScale.Crop, modifier = Modifier.fillMaxWidth().height(110.dp))
+                            Text(photo.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp))
+                            TextButton(onClick = { removed = removed + photo.path }, enabled = !busy,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Remove") }
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") }
+                    Button(onClick = { onConfirm(kept.map { it.path }.toSet()) }, enabled = !busy,
+                        modifier = Modifier.weight(1f)) { Text("Confirm ${kept.size} photos") }
+                }
+            }
+        }
+    }
+    if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false },
+        title = { Text("Clear active selection?") }, text = { Text(PhotoSelectionPresentation.CLEAR_EXPLANATION) },
+        confirmButton = { TextButton(onClick = { confirmClear = false; onConfirm(emptySet()) }) { Text("Clear selection") } },
+        dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } })
 }
 
 @Composable
@@ -379,17 +359,28 @@ private fun StatusCard(
     onExpandedChange: (Boolean) -> Unit,
     onOpenModels: () -> Unit,
     onCompleteMissing: () -> Unit,
+    onAddPhotos: () -> Unit,
+    onReview: () -> Unit,
+    onPause: () -> Unit,
+    onReindexSelection: (SelectionReindexConfirmation) -> Unit,
 ) {
     var showSample by remember { mutableStateOf(false) }
+    var confirmReset by remember { mutableStateOf(false) }
     var showThesis by remember { mutableStateOf(false) }
     var showModeDetails by remember { mutableStateOf(false) }
-    val busy = uiState.isIndexing || uiState.isSelectingPhotos || uiState.isIndexingPreflight
+    var reindexConfirmation by remember { mutableStateOf<SelectionReindexConfirmation?>(null) }
+    val busy = uiState.isIndexing || uiState.isVlmIndexing || uiState.isSelectingPhotos ||
+        uiState.isIndexingPreflight || uiState.isSearching || uiState.isModelOperationActive ||
+        uiState.isModelLoading || uiState.isVlmLoading || uiState.isSlmLoading
     val modeUnavailable = uiState.thesisMode !in uiState.enabledThesisModes
+    val readiness = uiState.modeReadiness[uiState.thesisMode].presentation()
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             ThesisDisclosureButton("Indexing & Source", expanded, { onExpandedChange(!expanded) })
             Text("Selected ${uiState.totalPhotos} · Searchable ${uiState.searchableCount} · Full ${uiState.fullyIndexedCount} · Partial ${uiState.partiallyIndexedCount}",
                 style = MaterialTheme.typography.bodySmall)
+            Text("Search in: ${PhotoSearchScope.label(uiState.searchScope, uiState.totalPhotos, uiState.existingIndexCount)}", style = MaterialTheme.typography.labelSmall)
+            if (uiState.selectionNotice.isNotBlank()) Text(uiState.selectionNotice, style = MaterialTheme.typography.bodySmall)
             if (uiState.isIndexing || uiState.isIndexingPreflight || uiState.isSelectingPhotos) {
                 if (uiState.isIndexing) LinearProgressIndicator(progress = { uiState.indexingProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                 else LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -399,21 +390,30 @@ private fun StatusCard(
                     else -> uiState.indexingMessage
                 }, style = MaterialTheme.typography.bodySmall)
                 if (uiState.isIndexing) {
-                    Text("Photo ${uiState.indexingProcessed}/${uiState.indexingTotal} · ${uiState.indexingStage} · ${elapsedTime(uiState.indexingElapsedMs)}", style = MaterialTheme.typography.labelSmall)
+                    Text("Photo ${uiState.indexingProcessed}/${uiState.indexingTotal} · ${ThesisIndexingControlPresentation.stageLabel(uiState.indexingStage)} · ${elapsedTime(uiState.indexingElapsedMs)}", style = MaterialTheme.typography.labelSmall)
                     Text("App RSS ${runtimeMiB(uiState.indexingRssMiB)} · sampled peak ${runtimeMiB(uiState.indexingPeakRssMiB)} · failed ${uiState.indexingFailedPhotos} · unavailable ${uiState.indexingUnavailablePhotos}",
                         style = MaterialTheme.typography.labelSmall)
-                    TextButton(onClick = onCancel) { Text("Pause / cancel") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onPause,
+                            enabled = ThesisIndexingControlPresentation.canPause(uiState.indexingStatus, uiState.isIndexing)) { Text("Pause") }
+                        TextButton(onClick = onCancel,
+                            enabled = ThesisIndexingControlPresentation.canStop(uiState.indexingStatus, uiState.isIndexing)) { Text("Stop now") }
+                    }
+                    Text("Pause finishes the active photo stage and saves completed channels. Stop now requests cancellation at the earliest safe runtime boundary.",
+                        style = MaterialTheme.typography.labelSmall)
                 }
             }
             if (uiState.indexingBlockReason.isNotBlank()) Text(uiState.indexingBlockReason,
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (modeUnavailable) {
-                Text("${if (uiState.thesisMode == ThesisSearchMode.RECOMMENDED) "Recommended mode" else uiState.thesisMode.displayLabel()} is not ready. Install required models and finish indexing.",
+                Text("${if (uiState.thesisMode == ThesisSearchMode.RECOMMENDED) "Recommended mode" else uiState.thesisMode.displayLabel()} is not ready. ${readiness.message}",
                     color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = onOpenModels, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Download models") }
-                    TextButton(onClick = if (uiState.canCompleteMissingChannels) onCompleteMissing else onIndex,
-                        enabled = !busy && (uiState.canCompleteMissingChannels || uiState.totalPhotos > 0), modifier = Modifier.weight(1f)) { Text("Complete indexing") }
+                    if (readiness.showDownloadModels) TextButton(onClick = onOpenModels, enabled = !busy,
+                        modifier = Modifier.weight(1f)) { Text("Download / verify models") }
+                    if (readiness.showCompletion) TextButton(onClick = if (uiState.canCompleteMissingChannels) onCompleteMissing else onIndex,
+                        enabled = !busy && uiState.selectionReviewed && (uiState.canCompleteMissingChannels || uiState.totalPhotos > 0),
+                        modifier = Modifier.weight(1f)) { Text(readiness.completionLabel) }
                     TextButton(onClick = { showModeDetails = true }, modifier = Modifier.weight(1f)) { Text("Details") }
                 }
             } else if (uiState.canCompleteMissingChannels && !busy) {
@@ -424,12 +424,17 @@ private fun StatusCard(
                 Text(uiState.sourceLabel, style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     OutlinedButton(onClick = onChoose, enabled = !busy, modifier = Modifier.weight(1f)) {
-                        Text(stringResource(R.string.choose_photos))
+                        Text("Choose folder")
                     }
                     OutlinedButton(onClick = { showSample = true }, enabled = !busy, modifier = Modifier.weight(1f)) {
                         Text(stringResource(R.string.random_gallery_sample))
                     }
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onAddPhotos, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Choose photos") }
+                    OutlinedButton(onClick = onReview, enabled = !busy && uiState.totalPhotos > 0, modifier = Modifier.weight(1f)) { Text("Review / edit selection") }
+                }
+                if (!uiState.selectionReviewed) Text("Review and confirm this selection before indexing.", style = MaterialTheme.typography.bodySmall)
                 Text("Full ${uiState.fullyIndexedCount} · failed/unavailable ${uiState.failedUnavailableCount} · existing index ${uiState.existingIndexCount}", style = MaterialTheme.typography.labelSmall)
                 Text(uiState.coverageSummary, style = MaterialTheme.typography.labelSmall)
                 Text("Partial means the photo remains searchable, but one or more optional indexing channels are unavailable.",
@@ -437,14 +442,17 @@ private fun StatusCard(
                 if (uiState.missingChannelSummary.isNotBlank()) Text(uiState.missingChannelSummary, style = MaterialTheme.typography.bodySmall)
                 Text("New selections need indexing. Existing compatible indexes remain searchable.", style = MaterialTheme.typography.bodySmall)
                 if (!uiState.isIndexing) {
-                    Button(onClick = onIndex, enabled = !busy && uiState.totalPhotos > 0, modifier = Modifier.fillMaxWidth()) {
-                        Text("Index available channels")
-                    }
+                    IndexActionButton(onClick = onIndex,
+                        onLongClick = { reindexConfirmation = SelectionReindexConfirmation.capture(uiState) },
+                        enabled = SelectionReindexConfirmation.canRequest(uiState))
+                    Text(stringResource(R.string.reindex_hold_hint), style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center)
                     if (uiState.indexingMessage.isNotBlank()) Text(uiState.indexingMessage, style = MaterialTheme.typography.bodySmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(onClick = onResume, enabled = uiState.canResumeIndexing && !busy) { Text("Resume") }
                         TextButton(onClick = onRefresh, enabled = !busy) { Text("Refresh") }
-                        TextButton(onClick = onReset, enabled = !busy && uiState.totalPhotos > 0) { Text("Reset selection") }
+                        TextButton(onClick = { confirmReset = true }, enabled = !busy && uiState.totalPhotos > 0) { Text("Reset selection") }
                     }
                 }
                 SearchModeSelector(uiState, onMode)
@@ -453,6 +461,31 @@ private fun StatusCard(
                 TextButton(onClick = { showThesis = true }) { Text(stringResource(R.string.thesis_configuration)) }
             }
         }
+    }
+    if (confirmReset) AlertDialog(onDismissRequest = { confirmReset = false },
+        title = { Text("Clear active selection?") }, text = { Text(PhotoSelectionPresentation.CLEAR_EXPLANATION) },
+        confirmButton = { TextButton(onClick = { confirmReset = false; onReset() }) { Text("Clear selection") } },
+        dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } })
+    reindexConfirmation?.let { confirmation ->
+        val unchanged = confirmation.matches(uiState.selectionSessionId, uiState.photoFiles.map { it.path })
+        AlertDialog(onDismissRequest = { reindexConfirmation = null },
+            title = { Text(stringResource(R.string.reindex_selected_title, confirmation.selectedPaths.size)) },
+            text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(stringResource(R.string.reindex_selected_explanation))
+                Text(stringResource(R.string.reindex_selected_retention))
+                if (!unchanged) Text(stringResource(R.string.reindex_selection_changed), color = MaterialTheme.colorScheme.error)
+            } },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (confirmation.canConfirm(uiState)) {
+                        reindexConfirmation = null
+                        onReindexSelection(confirmation)
+                    }
+                }, enabled = confirmation.canConfirm(uiState), modifier = Modifier.testTag("confirm_selection_reindex")) {
+                    Text(stringResource(R.string.reindex_selected_confirm))
+                }
+            },
+            dismissButton = { TextButton(onClick = { reindexConfirmation = null }) { Text("Cancel") } })
     }
     if (showModeDetails) AlertDialog(onDismissRequest = { showModeDetails = false },
         title = { Text("${uiState.thesisMode.displayLabel()} readiness") },
@@ -466,6 +499,26 @@ private fun StatusCard(
         showSample = false
         onRandom(count)
     })
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun IndexActionButton(onClick: () -> Unit, onLongClick: () -> Unit, enabled: Boolean) {
+    val colors = ButtonDefaults.buttonColors()
+    val longClickLabel = stringResource(R.string.reindex_selected_action)
+    Surface(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(ButtonDefaults.shape)
+            .testTag("index_selected_photos")
+            .combinedClickable(enabled = enabled, role = Role.Button, onClick = onClick,
+                onLongClickLabel = longClickLabel, onLongClick = onLongClick),
+        shape = ButtonDefaults.shape,
+        color = if (enabled) colors.containerColor else colors.disabledContainerColor,
+        contentColor = if (enabled) colors.contentColor else colors.disabledContentColor,
+    ) {
+        Box(Modifier.padding(ButtonDefaults.ContentPadding), contentAlignment = Alignment.Center) {
+            Text("Index available channels", style = MaterialTheme.typography.labelLarge)
+        }
+    }
 }
 
 private fun runtimeMiB(value: Double?): String = value?.let {
@@ -493,6 +546,9 @@ fun ThesisConfigurationDialog(onDismiss: () -> Unit) {
             Text("Visual: Photo → verified CLIP image embedding; query → paired CLIP text encoder. OCR: independent ML Kit Latin text recognition.")
             Text(ThesisConfiguration.RECOMMENDED_DESCRIPTION)
             Text(ThesisConfiguration.FINAL_FINDING)
+            Text(PhotoResultPresentation.ENGLISH_NOTICE_TITLE, fontWeight = FontWeight.Bold)
+            Text(PhotoResultPresentation.ENGLISH_NOTICE)
+            Text(PhotoResultPresentation.ENGLISH_NOTICE_CONTEXT, style = MaterialTheme.typography.bodySmall)
             Text("Safe projection retains eligible object evidence. Activities/relations are quarantined. Semantic source may be unavailable; photos can remain searchable through CLIP/OCR. Small correlated corpus; no release-readiness or generalization claim.")
             Text("Exact model versions, sizes and SHA-256 status are in Settings → Models. MiniLM is an embedding model; optional TinyLlama/legacy LLM models are not the thesis VLM.")
         } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } })
@@ -503,7 +559,7 @@ private fun RandomSampleDialog(onDismiss: () -> Unit, onSelect: (Int) -> Unit) {
     var count by remember { mutableStateOf("50") }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Random gallery sample") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Only photos you allow are considered. A fixed sample is copied unchanged and stays selected until reset/reselect. No search or indexing starts automatically.")
+            Text("Random readable photos are copied unchanged until your requested count is reached. Unreadable candidates are replaced without duplicates. If fewer photos are available, the shortfall is shown. Review and confirm before indexing; indexing never starts automatically.")
             Row {
                 listOf(10, 25, 50, 100).forEach { size ->
                     TextButton(onClick = { count = size.toString() }) { Text(size.toString()) }
@@ -623,121 +679,6 @@ private fun PhotoFileRow(photo: PhotoFileUi, onPhotoClick: (PhotoFileUi) -> Unit
 }
 
 @Composable
-private fun SearchTab(
-    uiState: PhotoSearchUiState,
-    onQueryChange: (String) -> Unit,
-    onSearch: () -> Unit,
-    onPhotoClick: (PhotoSearchResultUi) -> Unit
-) {
-    Column {
-        OutlinedTextField(
-            value = uiState.searchQuery,
-            onValueChange = onQueryChange,
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Search indexed photos...", color = MaterialTheme.colorScheme.onSurfaceVariant) },
-            leadingIcon = {
-                if (uiState.isSearching) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFF58A6FF), strokeWidth = 2.dp)
-                else Text("🔍", fontSize = 18.sp)
-            },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { onSearch() }),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color(0xFF58A6FF),
-                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-                focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
-                cursorColor = Color(0xFF58A6FF)
-            ),
-            shape = RoundedCornerShape(12.dp)
-        )
-        
-        Spacer(modifier = Modifier.height(12.dp))
-        
-        if (uiState.searchResults.isNotEmpty()) {
-            Text("Found ${uiState.searchResults.size} results", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
-            
-            LazyVerticalGrid(columns = GridCells.Fixed(2), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(uiState.searchResults) { result ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth().height(200.dp).clickable { onPhotoClick(result) },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                    ) {
-                        Column {
-                            Box(modifier = Modifier.fillMaxWidth().height(100.dp)) {
-                                AsyncImage(
-                                    model = File(result.filePath),
-                                    contentDescription = result.fileName,
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Crop
-                                )
-                                // Match type badge (top-left)
-                                val badgeColor = when (result.matchType) {
-                                    MatchType.CLIP -> Color(0xFF8957E5) // Purple for CLIP
-                                    MatchType.HYBRID -> Color(0xFFD29922) // Orange for hybrid
-                                    MatchType.SEMANTIC -> Color(0xFF008577)
-                                    MatchType.VISION_LLM -> Color(0xFF8957E5) // Purple for VLM
-                                    else -> Color(0xFF58A6FF) // Blue for OCR
-                                }
-                                Box(
-                                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
-                                        .background(badgeColor.copy(alpha = 0.95f), RoundedCornerShape(6.dp))
-                                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                                ) {
-                                    Text(result.matchType.name, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
-                                }
-                                // Score badge (top-right)
-                                Box(
-                                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
-                                        .background(Color(0xFF238636).copy(alpha = 0.95f), RoundedCornerShape(6.dp))
-                                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                                ) {
-                                    Text("${"%.4f".format(result.score)}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                            // Match reason
-                            if (result.matchReason.isNotBlank()) {
-                                Text(
-                                    text = result.matchReason.take(50),
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
-                                )
-                            }
-                            // OCR text preview
-                            Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 8.dp)) {
-                                Text(
-                                    text = result.ocrText?.take(40) ?: "No OCR text",
-                                    fontSize = 10.sp,
-                                    color = if (result.ocrText != null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        } else if (uiState.searchQuery.isNotBlank() && !uiState.isSearching) {
-            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                Text("No results for \"${uiState.searchQuery}\"", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("🔍", fontSize = 40.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Search text in indexed photos", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun SearchModeSelector(uiState: PhotoSearchUiState, onMode: (ThesisSearchMode) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -748,7 +689,7 @@ private fun SearchModeSelector(uiState: PhotoSearchUiState, onMode: (ThesisSearc
                 DropdownMenuItem(enabled = mode in uiState.enabledThesisModes,
                     text = { Column {
                         Text(mode.displayLabel())
-                        Text(if (mode in uiState.enabledThesisModes) "Ready" else "Not ready — models or compatible index needed",
+                        Text(if (mode in uiState.enabledThesisModes) "Ready" else uiState.modeReadiness[mode].presentation().message,
                             style = MaterialTheme.typography.labelSmall)
                     } }, onClick = { onMode(mode); expanded = false })
             }
@@ -763,6 +704,8 @@ private fun SearchTabScrollable(
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
     onMode: (ThesisSearchMode) -> Unit,
+    onScope: (SearchScope) -> Unit,
+    onLimit: (SearchResultLimit) -> Unit,
     onPhotoClick: (PhotoSearchResultUi) -> Unit
 ) {
     val phase = PhotoSearchPresentation.status(uiState)
@@ -771,6 +714,7 @@ private fun SearchTabScrollable(
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Existing index ${uiState.existingIndexCount} · Selected searchable ${uiState.searchableCount}",
             style = MaterialTheme.typography.bodySmall)
+        SearchScopeControls(uiState, onScope, onLimit)
         SearchModeSelector(uiState, onMode)
         OutlinedTextField(
             value = uiState.searchQuery,
@@ -790,7 +734,7 @@ private fun SearchTabScrollable(
         val examples = PhotoSearchPresentation.examples(uiState.thesisMode, uiState.thesisMode in uiState.enabledThesisModes)
         if (examples.isNotEmpty()) {
             Text("Try an example or write your own", style = MaterialTheme.typography.labelMedium)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 examples.forEach { example ->
                     SuggestionChip(onClick = { onQueryChange(example) }, enabled = !uiState.isSearching,
                         label = { Text(example) }, modifier = Modifier.heightIn(min = 48.dp))
@@ -804,7 +748,7 @@ private fun SearchTabScrollable(
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 Text("Searching on this device. The first model load can take longer.", style = MaterialTheme.typography.bodySmall)
             }
-            SearchViewStatus.MODE_UNAVAILABLE -> Text("This mode is not ready. Choose an available mode or install models and complete indexing in Files.",
+            SearchViewStatus.MODE_UNAVAILABLE -> Text(uiState.modeReadiness[uiState.thesisMode].presentation().message + " Open Files for indexing controls, or choose another ready mode.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             SearchViewStatus.ERROR -> Text(uiState.searchError ?: "Search could not finish. See Details.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -826,6 +770,8 @@ private fun SearchTabScrollable(
             style = MaterialTheme.typography.bodySmall)
         ThesisDisclosureButton("Search details", details, { details = !details })
         if (details) {
+            Text("Search scope: ${PhotoSearchScope.label(uiState.searchScope, uiState.totalPhotos, uiState.existingIndexCount)}. Unindexed or incompatible photos do not become searchable just by selecting them.", style = MaterialTheme.typography.bodySmall)
+            Text("Result limit is separate from RRF k=20. All available retains existing mode caps: OCR up to 10; frozen fusion uses legacy up to 20 and semantic up to 50, with up to 50 final results. Visual and Semantic return up to 50. It does not promise a result for every indexed photo.", style = MaterialTheme.typography.bodySmall)
             Text(uiState.modeReasons[uiState.thesisMode] ?: "Checking compatible models and index…", style = MaterialTheme.typography.bodySmall)
             if (uiState.searchNote.isNotBlank()) Text(uiState.searchNote, style = MaterialTheme.typography.bodySmall)
             uiState.lastQueryMs?.let { Text("Last query: ${"%.1f".format(it)} ms (diagnostic)", style = MaterialTheme.typography.labelSmall) }
@@ -834,65 +780,43 @@ private fun SearchTabScrollable(
 }
 
 @Composable
+private fun SearchScopeControls(uiState: PhotoSearchUiState, onScope: (SearchScope) -> Unit, onLimit: (SearchResultLimit) -> Unit) {
+    var scopeMenu by remember { mutableStateOf(false) }
+    var limitMenu by remember { mutableStateOf(false) }
+    Box {
+        ThesisDisclosureButton("Search in: ${PhotoSearchScope.label(uiState.searchScope, uiState.totalPhotos, uiState.existingIndexCount)}",
+            scopeMenu, { scopeMenu = !scopeMenu }, enabled = !uiState.isSearching && !uiState.isSelectingPhotos)
+        DropdownMenu(expanded = scopeMenu, onDismissRequest = { scopeMenu = false }) {
+            SearchScope.values().forEach { scope ->
+                DropdownMenuItem(text = { Text(PhotoSearchScope.label(scope, uiState.totalPhotos, uiState.existingIndexCount)) },
+                    onClick = { onScope(scope); scopeMenu = false })
+            }
+        }
+    }
+    Box {
+        ThesisDisclosureButton("Result limit: ${uiState.resultLimit.label}", limitMenu,
+            { limitMenu = !limitMenu }, enabled = !uiState.isSearching)
+        DropdownMenu(expanded = limitMenu, onDismissRequest = { limitMenu = false }) {
+            SearchResultLimit.values().forEach { limit ->
+                DropdownMenuItem(text = { Text(limit.label) }, onClick = { onLimit(limit); limitMenu = false })
+            }
+        }
+    }
+}
+
+@Composable
 private fun SearchResultCard(result: PhotoSearchResultUi, onPhotoClick: (PhotoSearchResultUi) -> Unit, modifier: Modifier = Modifier) {
-    Card(
-        modifier = modifier.height(200.dp).clickable { onPhotoClick(result) },
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column {
-            Box(modifier = Modifier.fillMaxWidth().height(100.dp)) {
-                AsyncImage(
-                    model = File(result.filePath),
-                    contentDescription = result.fileName,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-                // Match type badge (top-left)
-                val badgeColor = when (result.matchType) {
-                    MatchType.CLIP -> Color(0xFF8957E5)
-                    MatchType.HYBRID -> Color(0xFFD29922)
-                    MatchType.SEMANTIC -> Color(0xFF008577)
-                                    MatchType.VISION_LLM -> Color(0xFF8957E5)
-                    MatchType.SLM_PLANNER -> Color(0xFFD29922) // Amber for SLM
-                    else -> Color(0xFF58A6FF)
-                }
-                Box(
-                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
-                        .background(badgeColor.copy(alpha = 0.95f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                ) {
-                    Text(result.matchType.name, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
-                }
-                // Score badge (top-right)
-                Box(
-                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
-                        .background(Color(0xFF238636).copy(alpha = 0.95f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                ) {
-                    Text("${"%.4f".format(result.score)}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
-                }
-            }
-            // Match reason
-            if (result.matchReason.isNotBlank()) {
-                Text(
-                    text = result.matchReason.take(50),
-                    fontSize = 10.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
-                )
-            }
-            // OCR text preview
-            Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 8.dp)) {
-                Text(
-                    text = result.ocrText?.take(40) ?: "No OCR text",
-                    fontSize = 10.sp,
-                    color = if (result.ocrText != null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+    Card(modifier = modifier.heightIn(min = 210.dp).clickable { onPhotoClick(result) },
+        shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AsyncImage(model = File(result.filePath), contentDescription = result.fileName,
+                contentScale = ContentScale.Crop, modifier = Modifier.fillMaxWidth().height(110.dp))
+            Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(result.rank?.let { "Rank #$it" } ?: "Search result", style = MaterialTheme.typography.labelLarge)
+                Text(result.queryMode?.displayLabel() ?: result.matchType.name,
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                Text(PhotoResultPresentation.whyMatched(result), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

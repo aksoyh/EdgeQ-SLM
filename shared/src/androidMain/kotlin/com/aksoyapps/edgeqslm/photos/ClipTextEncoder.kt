@@ -11,7 +11,9 @@ import java.nio.LongBuffer
  * CLIP Text Encoder using ONNX Runtime
  * Converts text queries to 512-dimensional embeddings for image search
  */
-class ClipTextEncoder(private val context: Context) {
+class ClipTextEncoder(private val context: Context) : AutoCloseable {
+    var lastTokenizeMs: Double = 0.0
+        private set
     
     private val diagnostics by lazy { ThesisDiagnostics.get(context) }
     private var ortEnv: OrtEnvironment? = null
@@ -82,7 +84,9 @@ class ClipTextEncoder(private val context: Context) {
         val encodeStarted = System.nanoTime()
         
         try {
+            val tokenStarted = System.nanoTime()
             val (inputIds, attentionMask) = tokenize(text)
+            lastTokenizeMs = (System.nanoTime() - tokenStarted) / 1e6
             
             val inputIdsBuffer = LongBuffer.wrap(inputIds.map { it.toLong() }.toLongArray())
             val attentionMaskBuffer = LongBuffer.wrap(attentionMask.map { it.toLong() }.toLongArray())
@@ -150,9 +154,10 @@ class ClipTextEncoder(private val context: Context) {
         return Pair(inputIds, attentionMask)
     }
     
-    fun close() {
+    override fun close() {
         session?.close()
         session = null
+        vocab = null
         ortEnv = null
         diagnostics.modelState("clip_text", "closed")
     }

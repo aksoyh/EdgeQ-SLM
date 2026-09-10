@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -26,7 +27,7 @@ class PhotoIndexer(private val context: Context) {
     private val diagnostics = ThesisDiagnostics.get(context)
     private var imageEncoder: ClipImageEncoder? = null
     private var textEncoder: ClipTextEncoder? = null
-    private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private var textRecognizer: TextRecognizer? = null
     private var encoderPaths: Triple<String, String, String?>? = null
 
     init {
@@ -164,6 +165,16 @@ class PhotoIndexer(private val context: Context) {
         emitAll(indexSelected(getPhotosInFolder()))
     }.flowOn(Dispatchers.IO)
 
+    fun completionPlan(photo: PhotoFile, clipAvailable: Boolean): PhotoChannelWorkPlan {
+        val existing = vectorStore.getPhotoForVlmPath(photo.path)
+        return PhotoChannelWorkPlan.create(
+            currentFile = existing?.fileModified == photo.lastModified,
+            currentOcrOutcome = OcrIndexProvenanceStore(context).hasCurrentOutcome(vectorStore, photo.path, photo.lastModified),
+            compatibleClip = ClipIndexProvenanceStore(context).isCompatible(vectorStore, photo.path),
+            clipAvailable = clipAvailable,
+        )
+    }
+
     fun indexSelected(
         selected: List<PhotoFile>,
         completeMissingChannels: Boolean = false,
@@ -196,13 +207,7 @@ class PhotoIndexer(private val context: Context) {
                 val needs = vectorStore.needsIndexing(photo.path, photo.lastModified)
 
                 if (completeMissingChannels) {
-                    val existing = vectorStore.getPhotoForVlmPath(photo.path)
-                    channelPlan = PhotoChannelWorkPlan.create(
-                        currentFile = existing?.fileModified == photo.lastModified,
-                        currentOcrOutcome = OcrIndexProvenanceStore(context).hasCurrentOutcome(vectorStore, photo.path, photo.lastModified),
-                        compatibleClip = ClipIndexProvenanceStore(context).isCompatible(vectorStore, photo.path),
-                        clipAvailable = clipAvailable,
-                    )
+                    channelPlan = completionPlan(photo, clipAvailable)
                 }
                 
                 if (channelPlan?.hasWork == false || (channelPlan == null && !needs)) {
@@ -330,7 +335,9 @@ class PhotoIndexer(private val context: Context) {
                 
                 val image = InputImage.fromBitmap(bitmap, 0)
                 
-                textRecognizer.process(image)
+                val recognizer = textRecognizer ?: TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                    .also { textRecognizer = it }
+                recognizer.process(image)
                     .addOnSuccessListener { result ->
                         val text = result.text.takeIf { it.isNotBlank() }
                         bitmap.recycle()
@@ -394,7 +401,8 @@ class PhotoIndexer(private val context: Context) {
 
     fun close() {
         ModelResourceCoordinator.releaseClipOwner(this)
-        textRecognizer.close()
+        textRecognizer?.close()
+        textRecognizer = null
         vectorStore.close()
     }
 }

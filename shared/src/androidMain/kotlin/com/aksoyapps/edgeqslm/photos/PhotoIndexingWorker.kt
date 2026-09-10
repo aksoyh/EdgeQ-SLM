@@ -9,7 +9,9 @@ import com.aksoyapps.edgeqslm.diagnostics.ThesisDiagnostics
 import com.aksoyapps.edgeqslm.photos.models.ModelDelivery
 import android.util.Log
 import androidx.work.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 /**
@@ -26,10 +28,11 @@ class PhotoIndexingWorker(
         private const val WORK_NAME = "photo_indexing"
         private const val THESIS_WORK_NAME = "thesis_photo_indexing"
         private const val KEY_THESIS = "thesis_selection"
+        private val thesisScheduleLock = Any()
 
-        fun scheduleThesisIndexing(context: Context, session: ThesisIndexingSession) {
-            require(session.selectedPaths.isNotEmpty()) { "Choose photos before scheduling" }
-            ThesisIndexingStateStore(context, scheduled = true).save(session)
+        fun scheduleThesisIndexing(context: Context, session: ThesisIndexingSession) = synchronized(thesisScheduleLock) {
+            require(matchesActiveSelection(context, session)) { "Review and confirm the current photos before scheduling" }
+            ThesisIndexingStateStore(context, scheduled = true).save(session.copy(status = "PENDING", finishedAt = null))
             val request = PeriodicWorkRequestBuilder<PhotoIndexingWorker>(6, TimeUnit.HOURS)
                 .setConstraints(Constraints.Builder().setRequiresCharging(true).setRequiresBatteryNotLow(true).build())
                 .setInputData(workDataOf(KEY_THESIS to true))
@@ -38,9 +41,54 @@ class PhotoIndexingWorker(
             ThesisDiagnostics.get(context).event("background_scheduled", mapOf("selected" to session.total, "interval_hours" to 6, "requires_charging" to true), session.sessionId)
         }
 
-        fun cancelThesisIndexing(context: Context) {
+        fun cancelThesisIndexing(context: Context) = synchronized(thesisScheduleLock) {
+            val store = ThesisIndexingStateStore(context, scheduled = true)
+            store.snapshot()?.let { store.save(it.copy(status = "CANCELLED", finishedAt = System.currentTimeMillis())) }
             WorkManager.getInstance(context).cancelUniqueWork(THESIS_WORK_NAME)
             ThesisDiagnostics.get(context).event("background_schedule_cancelled")
+        }
+
+        fun invalidateThesisScheduleIfSelectionChanged(context: Context): Boolean = synchronized(thesisScheduleLock) {
+            val scheduled = scheduledThesisSelection(context)
+            if (scheduled == null) {
+                WorkManager.getInstance(context).cancelUniqueWork(THESIS_WORK_NAME)
+                return@synchronized false
+            }
+            if (matchesActiveSelection(context, scheduled)) return@synchronized false
+            cancelThesisIndexing(context)
+            ThesisDiagnostics.get(context).event("background_schedule_invalidated", mapOf(
+                "reason" to "selection_changed", "previous_selected" to scheduled.total), scheduled.sessionId)
+            true
+        }
+
+        fun scheduledThesisSelection(context: Context): ThesisIndexingSession? = synchronized(thesisScheduleLock) {
+            ThesisIndexingStateStore(context, scheduled = true).snapshot()?.takeIf { it.status == "PENDING" }
+        }
+
+        suspend fun thesisScheduleStatus(context: Context): ThesisScheduleStatus = withContext(Dispatchers.IO) {
+            val scheduled = synchronized(thesisScheduleLock) { ThesisIndexingStateStore(context, scheduled = true).snapshot() }
+            val activeWork = WorkManager.getInstance(context).getWorkInfosForUniqueWork(THESIS_WORK_NAME).get()
+                .firstOrNull { !it.state.isFinished }
+            val matches = scheduled != null && matchesActiveSelection(context, scheduled)
+            ThesisScheduleStatus(scheduled?.total ?: 0, when {
+                scheduled == null && activeWork != null -> "MISSING_SELECTION"
+                scheduled?.status != "PENDING" -> if (activeWork != null) "STOPPING" else "OFF"
+                !matches -> "SELECTION_CHANGED"
+                activeWork == null -> "OFF"
+                else -> activeWork.state.name
+            })
+        }
+
+        private fun matchesActiveSelection(context: Context, session: ThesisIndexingSession): Boolean {
+            val current = PhotoSelectionStore(context).snapshot()
+            return ThesisSchedulePolicy.matches(session.sessionId, session.selectedPaths,
+                current?.sessionId, current?.photos.orEmpty().map { it.path }, current?.reviewed == true)
+        }
+
+        private fun scheduleCanRun(context: Context, selected: ThesisIndexingSession): Boolean {
+            val scheduled = scheduledThesisSelection(context)
+            return scheduled != null && scheduled.sessionId == selected.sessionId && scheduled.selectedPaths == selected.selectedPaths &&
+                matchesActiveSelection(context, selected)
         }
 
         fun getThesisWorkInfo(context: Context) = WorkManager.getInstance(context).getWorkInfosForUniqueWorkLiveData(THESIS_WORK_NAME)
@@ -142,17 +190,31 @@ class PhotoIndexingWorker(
     
     override suspend fun doWork(): Result {
         if (inputData.getBoolean(KEY_THESIS, false)) {
-            val selected = ThesisIndexingStateStore(applicationContext, scheduled = true).snapshot()
-                ?: return Result.failure(workDataOf("error" to "missing_selection"))
+            val selected = scheduledThesisSelection(applicationContext)
+            if (selected == null || !scheduleCanRun(applicationContext, selected)) {
+                ThesisDiagnostics.get(applicationContext).event("background_skipped", mapOf("reason" to "selection_changed"), selected?.sessionId)
+                invalidateThesisScheduleIfSelectionChanged(applicationContext)
+                return Result.success()
+            }
             if (ModelDelivery(applicationContext).isBusy) {
                 ThesisDiagnostics.get(applicationContext).event("background_skipped", mapOf("reason" to "model_delivery_active"), selected.sessionId)
                 return Result.success()
             }
             setForeground(getForegroundInfo())
+            if (!scheduleCanRun(applicationContext, selected)) {
+                ThesisDiagnostics.get(applicationContext).event("background_skipped", mapOf("reason" to "selection_changed"), selected.sessionId)
+                invalidateThesisScheduleIfSelectionChanged(applicationContext)
+                return Result.success()
+            }
             ThesisDiagnostics.get(applicationContext).event("background_run_start", mapOf("selected" to selected.total), selected.sessionId)
             ThesisIndexingController(applicationContext).run(selected.copy(
                 startedAt = System.currentTimeMillis(), status = "PENDING", completeMissingChannels = true,
-            )) { progress ->
+            ), canStart = {
+                scheduleCanRun(applicationContext, selected).also { allowed ->
+                    if (!allowed) ThesisDiagnostics.get(applicationContext).event("background_skipped",
+                        mapOf("reason" to "selection_changed"), selected.sessionId)
+                }
+            }) { progress ->
                 setProgressAsync(workDataOf(KEY_CURRENT to progress.processed, KEY_TOTAL to progress.total, KEY_MESSAGE to progress.stage))
             }
             val completed = ThesisIndexingStateStore(applicationContext).snapshot()

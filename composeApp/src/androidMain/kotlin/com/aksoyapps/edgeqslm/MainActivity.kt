@@ -57,6 +57,9 @@ class MainActivity : ComponentActivity() {
             }.onFailure { photoSearchViewModel.reportError("Folder permission unavailable; choose the folder again") }
         }
     }
+    private val photoPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) photoSearchViewModel.addPhotos(uris)
+    }
     private val galleryPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val count = pendingSampleCount
         pendingSampleCount = null
@@ -77,11 +80,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             MainAppWithTabs(photoSearchViewModel, preferences,
                 onSelectFolder = { folderPicker.launch(null) },
+                onAddPhotos = { photoPicker.launch(arrayOf("image/*")) },
                 onRandomSample = ::requestRandomSample,
                 onStartIndexing = { startThesisIndexing(false) },
+                onReindexSelection = { startThesisIndexing(false, it) },
                 onCompleteMissingChannels = { startThesisIndexing(true) },
                 onResumeIndexing = { sendServiceAction(IndexingService.ACTION_RESUME_THESIS_INDEXING) },
                 onStopIndexing = { sendServiceAction(IndexingService.ACTION_STOP_INDEXING) },
+                onPauseIndexing = { sendServiceAction(IndexingService.ACTION_PAUSE_THESIS_INDEXING) },
                 modelDelivery = modelDelivery,
                 bundledPreparing = bundledPreparing,
                 bundledError = bundledError,
@@ -132,8 +138,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startThesisIndexing(completeMissing: Boolean) {
-        photoSearchViewModel.prepareIndexingStart(completeMissing) { session ->
+    private fun startThesisIndexing(completeMissing: Boolean, reindexSelection: SelectionReindexConfirmation? = null) {
+        photoSearchViewModel.prepareIndexingStart(completeMissing, reindexSelection) { session ->
             if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this,
                 Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -144,6 +150,7 @@ class MainActivity : ComponentActivity() {
                 putStringArrayListExtra(IndexingService.EXTRA_SELECTED_PATHS, ArrayList(session.selectedPaths))
                 putExtra(IndexingService.EXTRA_SESSION_ID, session.sessionId)
                 putExtra(IndexingService.EXTRA_INCLUDE_SEMANTIC, session.includeSemantic)
+                putExtra(IndexingService.EXTRA_REINDEX_REQUEST_ID, session.reindexRequestId)
             }
             ContextCompat.startForegroundService(this, intent)
         }
@@ -173,7 +180,7 @@ class MainActivity : ComponentActivity() {
 
     private fun sendServiceAction(action: String) {
         val intent = Intent(this, IndexingService::class.java).setAction(action)
-        if (action == IndexingService.ACTION_STOP_INDEXING) startService(intent)
+        if (action in setOf(IndexingService.ACTION_STOP_INDEXING, IndexingService.ACTION_PAUSE_THESIS_INDEXING)) startService(intent)
         else ContextCompat.startForegroundService(this, intent)
     }
 }
@@ -183,10 +190,13 @@ fun MainAppWithTabs(
     photoSearchViewModel: PhotoSearchViewModel,
     preferences: ThesisUiPreferences,
     onSelectFolder: () -> Unit,
+    onAddPhotos: () -> Unit,
     onRandomSample: (Int) -> Unit,
     onStartIndexing: () -> Unit,
+    onReindexSelection: (SelectionReindexConfirmation) -> Unit,
     onResumeIndexing: () -> Unit,
     onStopIndexing: () -> Unit,
+    onPauseIndexing: () -> Unit,
     onCompleteMissingChannels: () -> Unit,
     modelDelivery: ModelDelivery,
     bundledPreparing: Boolean,
@@ -247,12 +257,18 @@ fun MainAppWithTabs(
                         onQueryChange = photoSearchViewModel::updateQuery,
                         onSearch = photoSearchViewModel::search,
                         onStartIndexing = onStartIndexing,
+                        onReindexSelection = onReindexSelection,
                         onResumeIndexing = onResumeIndexing,
                         onStopIndexing = onStopIndexing,
+                        onPauseIndexing = onPauseIndexing,
                         onRefresh = photoSearchViewModel::refreshPhotoList,
                         onTabChange = photoSearchViewModel::selectTab,
                         onClearError = photoSearchViewModel::clearError,
                         onSelectFolder = onSelectFolder,
+                        onAddPhotos = onAddPhotos,
+                        onSearchScopeChange = photoSearchViewModel::setSearchScope,
+                        onResultLimitChange = photoSearchViewModel::setResultLimit,
+                        onConfirmSelection = photoSearchViewModel::confirmSelection,
                         onThesisModeChange = photoSearchViewModel::setThesisMode,
                         onRandomSample = onRandomSample,
                         onResetSelection = photoSearchViewModel::resetSelection,
@@ -263,10 +279,10 @@ fun MainAppWithTabs(
                     )
                 } else {
                     ThesisSettingsScreen(preferences, photoState, onResumeIndexing, onStopIndexing,
-                        onModelsChanged = photoSearchViewModel::refreshModeAvailability,
+                        onModelsChanged = photoSearchViewModel::invalidateQueryModels,
                         initialSection = settingsSection,
                         onCompleteMissingChannels = onCompleteMissingChannels,
-                        onPrepareBundled = onPrepareBundled)
+                        onPrepareBundled = onPrepareBundled, onPauseIndexing = onPauseIndexing)
                 }
             }
         }

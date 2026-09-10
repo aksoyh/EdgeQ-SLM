@@ -20,16 +20,23 @@ data class PhotoSearchUiState(
     val thesisMode: ThesisSearchMode = ThesisSearchMode.RECOMMENDED,
     val enabledThesisModes: Set<ThesisSearchMode> = emptySet(),
     val modeReasons: Map<ThesisSearchMode, String> = emptyMap(),
+    val modeReadiness: Map<ThesisSearchMode, ThesisModeAvailability> = emptyMap(),
+    val searchScope: SearchScope = SearchScope.ALL_INDEXED,
+    val resultLimit: SearchResultLimit = SearchResultLimit.TWENTY,
+    val selectionReviewed: Boolean = true,
     val sourceLabel: String = "No photos selected",
     val selectionSessionId: String = "",
+    val selectionNotice: String = "",
     val isSelectingPhotos: Boolean = false,
     val canResumeIndexing: Boolean = false,
     val canCompleteMissingChannels: Boolean = false,
     val isIndexingPreflight: Boolean = false,
+    val isModelOperationActive: Boolean = false,
     val indexingBlockReason: String = "",
     val missingChannelSummary: String = "",
     val indexingElapsedMs: Long? = null,
     val indexingStage: String = "",
+    val indexingStatus: String = "",
     val indexingProcessed: Int = 0,
     val indexingTotal: Int = 0,
     val indexingRssMiB: Double? = null,
@@ -99,6 +106,7 @@ data class PhotoFileUi(
     val channelStates: Map<String, String> = emptyMap(),
     val channelDisplayStatuses: Map<String, String> = emptyMap(),
     val channelDetails: Map<String, String> = emptyMap(),
+    val safeDetail: SafePhotoDetail? = null,
 )
 
 /**
@@ -115,7 +123,13 @@ data class PhotoSearchResultUi(
     val matchReason: String = "",
     val latencyMs: Long = 0,  // For benchmark comparison
     val vlmDescription: String? = null,  // VLM generated description
-    val vlmTags: String? = null  // VLM generated tags
+    val vlmTags: String? = null,
+    val rank: Int? = null,
+    val queryMode: ThesisSearchMode? = null,
+    val legacyRank: Int? = null,
+    val semanticRank: Int? = null,
+    val rawRrfScore: Double? = null,
+    val safeDetail: SafePhotoDetail? = null,
 )
 
 /**

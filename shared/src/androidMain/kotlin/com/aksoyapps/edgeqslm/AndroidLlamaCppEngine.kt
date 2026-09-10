@@ -55,12 +55,16 @@ class AndroidLlamaCppEngine : LlmEngine {
     // Vision model native methods
     private external fun loadVisionProjectorNative(projectorPath: String): Boolean
     private external fun isVisionModelLoadedNative(): Boolean
+    private external fun createVisionCancellationNative(): Long
+    private external fun cancelVisionRequestNative(request: Long)
+    private external fun releaseVisionCancellationNative(request: Long)
     private external fun analyzeImageNative(
         imageData: ByteArray,
         width: Int,
         height: Int,
         prompt: String,
         maxTokens: Int,
+        cancellationRequest: Long,
     ): String
 
     override suspend fun loadModel(modelPath: String): Boolean = withContext(Dispatchers.IO) {
@@ -209,56 +213,63 @@ class AndroidLlamaCppEngine : LlmEngine {
         prompt: String,
         maxTokens: Int = 320,
     ): GenerationResult = withContext(Dispatchers.IO) {
-        ModelResourceCoordinator.withNativeOperation(this@AndroidLlamaCppEngine) {
-            if (!isVisionLoaded()) {
-                throw IllegalStateException("Vision model not loaded. Load base model and vision projector first.")
-            }
-            require(width > 0 && height > 0 && imageData.size.toLong() == width.toLong() * height * 3) {
-                "Invalid RGB image dimensions"
-            }
-            require(maxTokens == 320) { "The accepted VLM contract requires 320 maximum tokens" }
+        cancellableNativeCall(
+            ::createVisionCancellationNative,
+            ::cancelVisionRequestNative,
+            ::releaseVisionCancellationNative,
+        ) { cancellationRequest ->
+            ModelResourceCoordinator.withNativeOperation(this@AndroidLlamaCppEngine) {
+                if (!isVisionLoaded()) {
+                    throw IllegalStateException("Vision model not loaded. Load base model and vision projector first.")
+                }
+                require(width > 0 && height > 0 && imageData.size.toLong() == width.toLong() * height * 3) {
+                    "Invalid RGB image dimensions"
+                }
+                require(maxTokens == 320) { "The accepted VLM contract requires 320 maximum tokens" }
 
-            println("$TAG: Analyzing image ${width}x${height}, prompt='${prompt.take(50)}...', maxTokens=$maxTokens")
+                println("$TAG: Analyzing image ${width}x${height}, prompt='${prompt.take(50)}...', maxTokens=$maxTokens")
 
-            val memoryBefore = Debug.getNativeHeapAllocatedSize()
+                val memoryBefore = Debug.getNativeHeapAllocatedSize()
 
-            var generatedText: String
-            val totalLatency = measureTimeMillis {
-                generatedText = analyzeImageNative(
-                    imageData,
-                    width,
-                    height,
-                    prompt,
-                    maxTokens,
+                var generatedText: String
+                val totalLatency = measureTimeMillis {
+                    generatedText = analyzeImageNative(
+                        imageData,
+                        width,
+                        height,
+                        prompt,
+                        maxTokens,
+                        cancellationRequest,
+                    )
+                }
+                check(!generatedText.startsWith("[Error:")) { generatedText }
+
+                val memoryAfter = Debug.getNativeHeapAllocatedSize()
+                val peakMemory = maxOf(memoryBefore, memoryAfter)
+
+                // Get timing from native side
+                val prefillTime = getPrefillTimeNative()
+                val decodeTime = getDecodeTimeNative()
+                val tokensGenerated = getTokensGeneratedNative()
+
+                val tokensPerSec = if (decodeTime > 0) {
+                    (tokensGenerated * 1000f) / decodeTime
+                } else {
+                    0f
+                }
+
+                println("$TAG: Vision analysis complete - TTFT: ${prefillTime}ms, Decode: ${decodeTime}ms, Tokens: $tokensGenerated, Speed: ${String.format("%.2f", tokensPerSec)} tok/s")
+
+                GenerationResult(
+                    text = generatedText,
+                    latencyMs = totalLatency,
+                    tokensPerSecond = tokensPerSec,
+                    memoryUsageBytes = peakMemory,
+                    prefillTimeMs = prefillTime,
+                    decodeTimeMs = decodeTime,
+                    tokensGenerated = tokensGenerated
                 )
             }
-            check(!generatedText.startsWith("[Error:")) { generatedText }
-
-            val memoryAfter = Debug.getNativeHeapAllocatedSize()
-            val peakMemory = maxOf(memoryBefore, memoryAfter)
-
-            // Get timing from native side
-            val prefillTime = getPrefillTimeNative()
-            val decodeTime = getDecodeTimeNative()
-            val tokensGenerated = getTokensGeneratedNative()
-
-            val tokensPerSec = if (decodeTime > 0) {
-                (tokensGenerated * 1000f) / decodeTime
-            } else {
-                0f
-            }
-
-            println("$TAG: Vision analysis complete - TTFT: ${prefillTime}ms, Decode: ${decodeTime}ms, Tokens: $tokensGenerated, Speed: ${String.format("%.2f", tokensPerSec)} tok/s")
-
-            GenerationResult(
-                text = generatedText,
-                latencyMs = totalLatency,
-                tokensPerSecond = tokensPerSec,
-                memoryUsageBytes = peakMemory,
-                prefillTimeMs = prefillTime,
-                decodeTimeMs = decodeTime,
-                tokensGenerated = tokensGenerated
-            )
         }
     }
 }
